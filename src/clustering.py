@@ -1,5 +1,6 @@
 """Container for clustering"""
 import csv
+import random
 import time
 from datetime import datetime
 from pathlib import Path
@@ -9,6 +10,8 @@ import cdlib
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
+import scipy.sparse
+import scipy.sparse.linalg
 from cdlib import NodeClustering, algorithms
 from cdlib.evaluation import normalized_mutual_information, adjusted_mutual_information
 from tqdm.auto import tqdm
@@ -24,7 +27,7 @@ class LFRGraph:
     def __init__(self, paths: Paths, n: int, mu: float):
         self.paths = paths
         self.n = n
-        self.mu = mu
+        self.mu = round(mu, 2)
         self.name = f'LFR-{self.n}-{int(self.mu * 100)}'
 
         self.input_g = self._read_graph()
@@ -35,25 +38,62 @@ class LFRGraph:
         self.stats = {}  # store the stats
         return
 
-    def run_method(self, method: str, num_trials: int = 1, write_results: bool = False, overwrite: bool = False):
+    def run_correlation_clustering(self, method: str, num_trials: int = 1, overwrite: bool = False):
+        """
+        Helper for correlation clustering
+        """
+        corr_cluster = CorrelationClustering(input_g=self.input_g, method=method)
+
+        for tau in tqdm(np.linspace(0, corr_cluster.tau_max, 5), desc='Correlation clustering'):
+            self.run_method(method=method, num_trials=num_trials, overwrite=overwrite, tau=tau,
+                            corr_cluster=corr_cluster)
+            if 'disc' in method:  # R1 is not defined for discrete
+                break
+        return
+
+    def run_method(self, method: str, num_trials: int = 1, overwrite: bool = False, tau: float = np.nan,
+                   corr_cluster=None):
         """
         runs the clustering using CDlib, write the results in a CSV, and store the clustering as a text file
         """
+        if method == 'infomap':
+            raise NotImplementedError(f'InfoMap not working')
+
         new_run = False  # true if it's a new run
         for trial in range(1, num_trials + 1):
-            output_cluster_path = self.paths.results_dir / 'LFR' / method / f'{self.name}_{method}_{trial}_clusters.txt'
+            if tau is None:
+                output_cluster_path = self.paths.results_dir / 'LFR' / method / f'{self.name}_{method}_{trial}_clusters.txt'
+            else:  # for correlation leakage methods
+                t = round(tau, 4)
+                output_cluster_path = self.paths.results_dir / 'LFR' / method / f'{self.name}_{method}_{t}_{trial}_clusters.txt'
 
-            if output_cluster_path.exists() and not overwrite:
+            if method == 'original':  # store the original values once
+                clustering = self.ground_truth_clustering
+                time_taken = np.NAN
+                new_run = True
+                if trial > 1:  # process the original graph only once
+                    break
+
+            elif output_cluster_path.exists() and not overwrite:
                 clustering = self._read_clustering(method=method, cluster_path=output_cluster_path)
                 time_taken = np.NAN
 
             else:  # compute clustering
                 new_run = True
-                if method in ('leiden', 'louvain', 'infomap', 'greedy_modularity', 'label_propagation'):
+                if method in ('leiden', 'louvain', 'greedy_modularity', 'label_propagation', 'sbm_dl'):
                     cdlib_alg = getattr(cdlib.algorithms, method)
                     tic = time.time()
                     clustering = cdlib_alg(self.input_g)
                     time_taken = time.time() - tic
+
+                elif method in (
+                'graph-walk_cont', 'graph-walk_disc', 'random-walk_cont', 'random-walk_disc', 'diffusion_cont'):
+                    tic = time.time()
+                    assert corr_cluster.method == method, f'Method mismatch'
+                    clustering = corr_cluster.get_clusters(tau=tau)
+                    time_taken = time.time() - tic
+
+
                 else:
                     raise NotImplementedError(f'{method=!r} not implemented')
 
@@ -66,8 +106,8 @@ class LFRGraph:
             nmi = normalized_mutual_information(self.ground_truth_clustering, clustering).score
             ami = adjusted_mutual_information(self.ground_truth_clustering, clustering).score
 
-            stats = dict(timestamp=datetime.now(), name=self.name, method=method, trial=trial,
-                         time_taken=time_taken, num_clusters=num_clusters, modularity=modularity,
+            stats = dict(timestamp=datetime.now(), name=self.name, mu=self.mu, method=method, tau=tau, trial=trial,
+                         running_time=time_taken, num_clusters=num_clusters, modularity=modularity,
                          NMI=nmi, AMI=ami, output_cluster_path=output_cluster_path)
             # rich.print(stats)
 
@@ -86,8 +126,8 @@ class LFRGraph:
         stats_path = self.paths.results_dir / 'stats.csv'
         file_exists = stats_path.exists()
 
-        columns = ['timestamp', 'name', 'method', 'trial', 'time_taken', 'num_clusters', 'modularity', 'NMI', 'AMI',
-                   'output_cluster_path']
+        columns = ['timestamp', 'name', 'mu', 'method', 'tau', 'trial', 'running_time', 'num_clusters', 'modularity',
+                   'NMI', 'AMI', 'output_cluster_path']
 
         with open(stats_path, 'a') as f:
             csv_writer = csv.DictWriter(f, fieldnames=columns)
@@ -98,15 +138,17 @@ class LFRGraph:
         return
 
     def plot_clustering(self, method: str = 'ground_truth', ix: int = -1, figsize: Tuple[int, int] = (25, 25),
-                        node_size: int = 150):
+                        node_size: int = 150, clustering=None):
         if self.pos is None:
             self.pos = nx.spring_layout(self.input_g, iterations=100)
+
         ncols = 1
         if method == 'ground_truth':
             clustering = self.ground_truth_clustering
-        else:
+            ncols = 1
+        elif clustering is None:
             clustering = self.generated_clusterings[method][ix]  # plot the latest by default
-            # ncol = 2
+            ncols = 2
 
         modularity = clustering.newman_girvan_modularity().score
         num_clusters = len(clustering.communities)
@@ -167,3 +209,208 @@ class LFRGraph:
         if method == 'ground_truth':
             tqdm.write(f'{self.name!r} {method!r} #communities: {len(clusters_dict):,} modularity: {modularity:.3g}')
         return clustering
+
+
+class CorrelationClustering:
+    """
+    Container for running correlation clustering methods
+    main idea: avoid recalculation of objects that don't change - esp matrices
+    """
+
+    def __init__(self, method: str, input_g: nx.Graph, old: bool = False):
+        self.method = method
+        self.input_g = input_g
+
+        self.A, self.A_prime, self.d, self.D = self._init_matrices()
+        if old:
+            self.R0, self.R1, self.tau_max = self.generate_R_matrices_old()
+        else:
+            self.R0, self.R1, self.tau_max = self.generate_R_matrices()
+        return
+
+    def _init_matrices(self):
+        n, m = self.input_g.order(), self.input_g.size()
+
+        # A = nx.to_scipy_sparse_array(self.input_g, dtype='d', nodelist=list(range(n)))
+        A = nx.to_numpy_array(self.input_g, dtype='d', nodelist=list(range(n)))
+        d = A @ np.ones((n, 1))  # n x 1 degree vector
+        D = np.eye(n) * d
+        # D = scipy.sparse.diags(d.flatten())
+        # D = np.diags(d.flatten())
+        A_prime = (d @ np.transpose(d)) / (2 * m)  # null model
+        return A, A_prime, d, D
+
+    def generate_R_matrices(self):
+        if self.method == 'graph-walk_cont':
+            H = -self.A
+            H_prime = -self.A_prime
+
+        elif self.method == 'diffusion_cont':
+            H = self.D - self.A
+            H_prime = self.D - self.A_prime  # D_prime should equal D
+
+        elif self.method == 'random-walk_cont':
+            n = self.input_g.order()
+            # I = scipy.sparse.eye(n, n)
+            I = np.eye(n)
+
+            # D_inv = scipy.sparse.diags((1 / self.d).flatten())
+            D_inv = np.eye(n) * (1 / self.d)
+
+            H = I - (self.A @ D_inv)
+            H_prime = I - (self.A_prime @ D_inv)  # I_prime and D_inv_prime should be the same
+
+        elif self.method == 'graph-walk_disc':
+            H = self.A
+            H_prime = self.A_prime
+
+        elif self.method == 'random-walk_disc':
+            # D_inv = scipy.sparse.diags((1 / self.d).flatten())
+            n = self.A.shape[0]
+            D_inv = np.eye(n) * (1 / self.d)
+            H = self.A @ D_inv
+            H_prime = self.A_prime @ D_inv
+
+        else:
+            raise NotImplementedError()
+
+        tau_max = 1 / abs(scipy.sparse.linalg.eigs(H, k=1)[0][0])  # to make sure it's non-negative
+        H_t, H_prime_t = H.transpose(), H_prime.transpose()
+
+        if self.method.endswith('_disc'):  # discrete method
+            R0 = -H @ H_t + H_prime @ H_prime_t
+            R1 = None
+        elif self.method.endswith('_cont'):  # continous method
+            R0 = H + H_t - H_prime - H_prime_t
+
+            R1 = (H @ H + H_t @ H_t + 2 * H @ H_t) \
+                 - 1 * (H_prime @ H + H_prime @ H_t + H @ H_prime_t + H_t @ H_prime_t)
+        else:
+            raise NotImplementedError()
+        return R0, R1, tau_max
+
+    def generate_R_matrices_old(self):
+        if self.method == 'graph-walk_cont':
+            H = -self.A
+            R0 = -2 * (self.A - self.A_prime)  # eq 15
+            R1 = 4 * (self.A @ self.A) - 2 * (self.A_prime @ self.A + self.A @ self.A_prime)
+
+        elif self.method == 'diffusion_cont':
+            H = self.D - self.A
+            R0 = -2 * (self.A - self.A_prime)
+
+            # eq 22
+            R1 = 4 * (self.A @ self.A) - 2 * (self.D @ self.A) - 2 * (self.A @ self.D) - 2 * (self.A @ self.A_prime) \
+                 - 2 * (self.A_prime @ self.A)
+
+        elif self.method == 'random-walk_cont':
+            n = self.input_g.order()
+            # I = scipy.sparse.eye(n, n)
+            # D_inv = scipy.sparse.diags((1 / self.d).flatten())
+            I = np.eye(n)
+            D_inv = np.eye(n) * (1 / self.d)
+
+            H = I - (self.A @ D_inv)
+            R0 = -1 * (self.A - self.A_prime) @ D_inv - D_inv @ (self.A - self.A_prime)
+
+            # eq 32
+            R1 = (self.A @ D_inv @ self.A @ D_inv) + (D_inv @ self.A @ D_inv @ self.A) \
+                 + (self.A @ D_inv @ D_inv @ self.A) + (D_inv @ self.A @ self.A @ D_inv) \
+                 - (self.A_prime @ D_inv @ self.A @ D_inv) - (self.A_prime @ D_inv @ D_inv @ self.A) \
+                 - (self.A @ D_inv @ D_inv @ self.A_prime) - (D_inv @ self.A @ D_inv @ self.A_prime) - (2 * R0)
+
+        elif self.method == 'graph-walk_disc':
+            H = self.A
+            # eq 38
+            R0 = (-self.A @ self.A) + (self.A_prime @ self.A_prime)
+            R1 = None
+
+        elif self.method == 'random-walk_disc':
+            n = self.input_g.order()
+            D_inv = np.eye(n) * (1 / self.d)
+            # D_inv = scipy.sparse.diags((1 / self.d).flatten())
+            H = self.A @ D_inv
+
+            R0 = -(self.A @ D_inv @ D_inv @ self.A) + (self.A_prime @ D_inv @ D_inv @ self.A_prime)
+            R1 = None
+
+        else:
+            raise NotImplementedError()
+
+        # tau_max = 1 / abs(scipy.sparse.linalg.eigsh(H, k=1)[0][0])  # to make sure it's non-negative
+        tau_max = -1  # change later
+        return R0, R1, tau_max
+
+    def get_clusters(self, tau: float):
+        if self.R1 is None:
+            R = self.R0
+        else:
+            R = self.R0 - (tau * self.R1)
+        R = R * -1  # to maximize
+
+        n = R.shape[0]
+        communities = [{u} for u in range(n)]  # list of sets
+
+        iters = 0
+        changed = True
+
+        while changed:
+            iters += 1
+            changed = False
+            nodes = list(range(n))
+            random.shuffle(nodes)  # shuffle the ordering - TODO: profile performance
+
+            for i in nodes:  # try all nodes
+                current_comm_i_idx = [ix for ix, comm in enumerate(communities) if i in comm][0]
+
+                loss_i_from_current_comm = 0  # loss from i leaving its current comm
+                for j in communities[current_comm_i_idx]:  # members of i's community
+                    if i != j:
+                        loss_i_from_current_comm -= R[i, j]
+
+                new_comm_i = None
+                gain_i_to_new_comm = 0
+
+                for comm_ix, community in enumerate(communities):  # iterate over all non-emptycommunities
+                    if len(community) == 0:  # empty
+                        continue
+                    if comm_ix == current_comm_i_idx:  # skip over i's current community
+                        continue
+                    g = 0
+                    for j in community:  # j is from a different community
+                        g += R[i, j]
+
+                    if g > gain_i_to_new_comm:
+                        gain_i_to_new_comm = g
+                        new_comm_i = comm_ix
+
+                quality_change = gain_i_to_new_comm + loss_i_from_current_comm
+
+                if new_comm_i is not None and quality_change > 0:
+                    # remove i from old comm, add it to the new comm
+                    changed = True
+                    communities[new_comm_i].add(i)
+                    communities[current_comm_i_idx].remove(i)
+
+        communities = [list(comm) for comm in communities if len(comm) > 0]
+        clustering = NodeClustering(graph=self.input_g, method_name=self.method, communities=communities)
+        return clustering
+
+
+if __name__ == '__main__':
+    # test_g = nx.karate_club_graph()
+
+    # test_g = nx.barbell_graph(4, 5)
+    test_g = nx.erdos_renyi_graph(n=20, p=0.75, seed=0)
+
+    methods = ('graph-walk_cont', 'graph-walk_disc', 'random-walk_cont', 'random-walk_disc', 'diffusion_cont')[2: 3]
+    for method in methods:
+        corr_cluster_old = CorrelationClustering(input_g=test_g, method=method, old=True)
+        corr_cluster_new = CorrelationClustering(input_g=test_g, method=method, old=False)
+
+        assert np.allclose(corr_cluster_old.R0, corr_cluster_new.R0), f'{method!r} R0 mismatch'
+        if corr_cluster_old.R1 is not None and corr_cluster_new.R1 is not None:
+            if not np.allclose(corr_cluster_old.R1, corr_cluster_new.R1):
+                print(f'{method!r} R1 mismatch')
+        # if not np.isclose(corr_cluster_old.tau_max, corr_cluster_new.tau_max):
+        #     print(f'{method!r} tau mismatch')

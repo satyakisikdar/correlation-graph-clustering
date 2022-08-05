@@ -60,7 +60,7 @@ class BaseClustering:
         # running the method num_trials many times
         stats_filename = self.paths.results_dir / 'stats_others.csv'
 
-        for trial in range(1, num_trials):
+        for trial in range(1, num_trials + 1):
             cluster_path = self.output_cluster_base / f'{self.name}_{self.method}_{trial}_clusters.txt'
 
             if cluster_path.exists() and not overwrite:  # clustering already exists

@@ -7,7 +7,7 @@ import networkx as nx
 import numpy as np
 from tqdm.auto import tqdm
 
-from src.clustering import LFRGraph
+from src.clustering import LFRGraph, CorrelationClustering
 from src.utils import Paths, remove_files
 
 
@@ -62,21 +62,34 @@ def LFR_runner():
     :return:
     """
     paths = Paths(basedir='./')
-    n = 1000
+    n = 10_000
     mus = np.linspace(0, 1, 21)
     for mu in mus:
         generate_LFR(paths=paths, n=n, mu=mu)
     return
 
 
-def main():
+def corr_tester():
     paths = Paths(basedir='./')
-    n = 1000
+    methods = ('graph-walk_cont', 'graph-walk_disc', 'random-walk_cont', 'random-walk_disc', 'diffusion_cont')
+    n = 10_000
     mus = np.linspace(0, 1, 21)
-    for mu in reversed(mus):
-        lfr_graph = LFRGraph(paths=paths, n=1000, mu=mu)
-        # methods = ['leiden', 'louvain', 'infomap', 'label_propagation', 'greedy_modularity'][-2: ]
-        methods = ['infomap']
+    # mus = [0.1]
+    for mu in mus:
+        for method in methods:
+            lfr_graph = LFRGraph(paths=paths, n=n, mu=mu)
+            lfr_graph.run_correlation_clustering(method=method, num_trials=5, overwrite=False)
+    return
+
+
+def other_methods_runner():
+    paths = Paths(basedir='./')
+    n = 10000
+    mus = np.linspace(0, 1, 21)
+    for mu in mus:
+        lfr_graph = LFRGraph(paths=paths, n=n, mu=mu)
+        methods = ['sbm_dl', 'original', 'leiden', 'louvain', 'label_propagation', 'greedy_modularity']
+
         with tqdm(total=len(methods), desc='Running algorithms...', leave=True) as pbar:
             for method in methods:
                 pbar.set_description(f'Mu: {mu:.2f} Method: {method!r}')
@@ -89,5 +102,29 @@ def main():
     return
 
 
+def main():
+    paths = Paths(basedir='./')
+    # method = 'label_propagation'
+    # clustering_method = OtherClustering(lfr_graph=lfr_g, method=method, name=lfr_g.name,
+    #                                     paths=paths)
+
+    mus = np.linspace(0, 1, 21)
+    for mu in tqdm(mus):
+        lfr_g = LFRGraph(mu=mu, paths=paths, n=1000)
+        methods = 'GW', 'RW', 'Diff'
+        for method in tqdm(methods):
+            for continuous in [True, False]:
+                if method == 'Diff' and not continuous:
+                    continue
+                clustering_method = CorrelationClustering(lfr_graph=lfr_g, method=method, continuous=continuous,
+                                                          name=lfr_g.name, paths=paths)
+                clustering_method.run(num_trials=10, overwrite=True)
+
+    return
+
+
 if __name__ == '__main__':
+    # corr_tester()
+    # other_methods_runner()
+    # LFR_runner()
     main()

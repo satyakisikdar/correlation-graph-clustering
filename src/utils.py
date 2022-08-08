@@ -20,6 +20,8 @@ class Paths:
         self.basedir: Path = Path(basedir)
         self.data_dir: Path = self.basedir / 'data'
         self.results_dir: Path = self.basedir / 'results'
+
+        self.lfr_dir: Path = self.basedir / 'LFR'
         return
 
 

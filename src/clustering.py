@@ -2,10 +2,11 @@
 import abc
 import csv
 import random
+import subprocess
+import sys
 import time
 from datetime import datetime
-from pathlib import Path
-from typing import Tuple, Union, Dict
+from typing import Tuple, Dict
 
 import cdlib
 import matplotlib.pyplot as plt
@@ -17,7 +18,9 @@ from cdlib import NodeClustering, algorithms
 from cdlib.evaluation import normalized_mutual_information, adjusted_mutual_information
 from tqdm.auto import tqdm
 
-from src.utils import Paths, plot_network_clusters, write_clustering
+sys.path.extend(['./', '../'])
+
+from src.utils import Paths, plot_network_clusters, write_clustering, remove_files
 
 
 class BaseClustering:
@@ -332,87 +335,24 @@ class LFRGraph:
     Container for LFR graphs - store both the graph object and the node community labels
     """
 
-    def __init__(self, paths: Paths, n: int, mu: float):
+    def __init__(self, paths: Paths, n: int, mu: float, avg_k: int, max_k: int = 50):
+        """
+        n: number of nodes
+        mu: mixing parameter
+        avg_k: average degree
+        """
         self.paths = paths
         self.n = n
         self.mu = round(mu, 2)
-        self.name = f'LFR-{self.n}-{int(self.mu * 100)}'
+        self.avg_k = avg_k
+        self.max_k = max_k
+        self.name = f'LFR-{self.n // 1000}k-{max_k}-{avg_k}-{int(self.mu * 100)}'
 
-        self.input_g = self._read_graph()
-        self.pos = None  # store the node positions
-        self.ground_truth_clustering: NodeClustering = self._read_clustering(method='ground_truth')
+        self.graph_basepath = self.paths.data_dir / 'LFR' / f'{self.n // 1000}k-{max_k}/{avg_k}'
+        # self.input_g = None
+        # self.pos = None  # store the node positions
+        # self.ground_truth_clustering: NodeClustering = self.generate_ground_truth_clustering()
         return
-
-    def _run_method(self, method: str, num_trials: int = 1, overwrite: bool = False, tau: float = np.nan,
-                    corr_cluster=None):
-        """
-        runs the clustering using CDlib, write the results in a CSV, and store the clustering as a text file
-        """
-        if method == 'infomap':
-            raise NotImplementedError(f'InfoMap not working')
-
-        new_run = False  # true if it's a new run
-        for trial in range(1, num_trials + 1):
-            if tau is None:
-                output_cluster_path = self.paths.results_dir / 'LFR' / method / f'{self.name}_{method}_{trial}_clusters.txt'
-            else:  # for correlation leakage methods
-                t = round(tau, 4)
-                output_cluster_path = self.paths.results_dir / 'LFR' / method / f'{self.name}_{method}_{t}_{trial}_clusters.txt'
-
-            if method == 'original':  # store the original values once
-                clustering = self.ground_truth_clustering
-                time_taken = np.NAN
-                new_run = True
-                if trial > 1:  # process the original graph only once
-                    break
-
-            elif output_cluster_path.exists() and not overwrite:
-                clustering = self._read_clustering(method=method, cluster_path=output_cluster_path)
-                time_taken = np.NAN
-
-            else:  # compute clustering
-                new_run = True
-                if method in ('leiden', 'louvain', 'greedy_modularity', 'label_propagation', 'sbm_dl'):
-                    cdlib_alg = getattr(cdlib.algorithms, method)
-                    tic = time.time()
-                    clustering = cdlib_alg(self.input_g)
-                    time_taken = time.time() - tic
-
-                elif method in (
-                'graph-walk_cont', 'graph-walk_disc', 'random-walk_cont', 'random-walk_disc', 'diffusion_cont'):
-                    tic = time.time()
-                    assert corr_cluster.method == method, f'Method mismatch'
-                    clustering = corr_cluster.get_clusters(tau=tau)
-                    time_taken = time.time() - tic
-
-                else:
-                    raise NotImplementedError(f'{method=!r} not implemented')
-
-            if method not in self.generated_clusterings:
-                self.generated_clusterings[method] = []
-            self.generated_clusterings[method].append(clustering)
-
-            modularity = clustering.newman_girvan_modularity().score
-            num_clusters = len(clustering.communities)
-            nmi = normalized_mutual_information(self.ground_truth_clustering, clustering).score
-            ami = adjusted_mutual_information(self.ground_truth_clustering, clustering).score
-
-            stats = dict(timestamp=datetime.now(), name=self.name, mu=self.mu, method=method, trial=trial,
-                         running_time=time_taken, num_clusters=num_clusters, modularity=modularity,
-                         NMI=nmi, AMI=ami, output_cluster_path=output_cluster_path)
-            # rich.print(stats)
-
-            if method not in self.stats:
-                self.stats[method] = []
-            self.stats[method].append(stats)
-
-            if new_run:
-                # write clustering to file
-                write_clustering(clustering=clustering, cluster_path=output_cluster_path)
-                self.write_stats(stats)
-
-        return
-
 
     def plot_clustering(self, method: str = 'ground_truth', ix: int = -1, figsize: Tuple[int, int] = (25, 25),
                         node_size: int = 150, clustering=None):
@@ -467,45 +407,72 @@ class LFRGraph:
         g.name = self.name
         return g
 
-    def _read_clustering(self, method: str, cluster_path: Union[str, Path] = None) -> NodeClustering:
-        if method == 'ground_truth':
-            cluster_path = self.paths.data_dir / 'LFR' / f'{self.name}_clusters.txt'
+    def get_graph_and_clustering(self, trial: int):
+        output_graph_path = self.graph_basepath / f'{self.name}_{trial}.gml'
+        lfr_g = nx.read_gml(output_graph_path, destringizer=int)
+        lfr_g.name = self.name
 
-        with open(cluster_path) as reader:
-            clusters_dict = {}  # key: community label, value: list of member nodes
-            for line in reader:
-                u, c_u = map(int, line.split())
-                if c_u not in clusters_dict:
-                    clusters_dict[c_u] = []
+        ground_truth_labels = nx.get_node_attributes(lfr_g, name='ground_truth')
+        clusters_dict = {}  # key: community label, value: list of member nodes
 
-                clusters_dict[c_u].append(u)
+        for u, c_u in ground_truth_labels.items():
+            if c_u not in clusters_dict:
+                clusters_dict[c_u] = []
+            clusters_dict[c_u].append(u)
 
-        clustering = NodeClustering(communities=list(clusters_dict.values()), graph=self.input_g,
-                                    method_name=method)
-        modularity = clustering.newman_girvan_modularity().score
-        if method == 'ground_truth':
-            tqdm.write(f'{self.name!r} {method!r} #communities: {len(clusters_dict):,} modularity: {modularity:.3g}')
-        return clustering
+        clustering = NodeClustering(communities=list(clusters_dict.values()), graph=lfr_g,
+                                    method_name='ground_truth')
+        return lfr_g, clustering
 
+    def generate_graphs(self, num_graphs: int, overwrite: bool = False):
+        """
+         Generate num_graphs graphs with the same parameters
+        """
+        tau1, tau2 = 2, 3
+        avg_degree = self.avg_k
+        max_degree = self.max_k
+        c_min = 10
+        c_max = 100
+        self.graph_basepath.mkdir(exist_ok=True)
 
+        for trial in range(1, num_graphs + 1):
+            output_graph = self.graph_basepath / f'{self.name}_{trial}.gml'
+            if output_graph.exists() and not overwrite:
+                continue
+            args = f'cd {self.paths.lfr_dir}; ./benchmark -N {self.n} -k {avg_degree} -maxk {max_degree} -mu {self.mu} ' \
+                   f'-t1 {tau1} -t2 {tau2} -minc {c_min} -maxc {c_max}'
+            subprocess.run(args=args, shell=True)
 
+            generated_graph_path, generated_cluster_path = self.paths.lfr_dir / 'network.dat', self.paths.lfr_dir / 'community.dat'
 
+            # preprocess the grpah - reindex from 0, adjust cluster labels accordingly
+            g = nx.read_edgelist(generated_graph_path, nodetype=int)
+
+            clusters = {}
+            with open(generated_cluster_path) as reader:
+                for line in reader:
+                    u, c_u = map(int, line.split())
+                    clusters[u] = c_u
+            nx.set_node_attributes(g, name='ground_truth', values=clusters)
+            relabeled_g = nx.convert_node_labels_to_integers(g, first_label=0, ordering='sorted')
+
+            nx.write_gml(relabeled_g, path=output_graph)
+            remove_files([generated_graph_path, generated_cluster_path, self.paths.lfr_dir / 'statistics.dat',
+                          self.paths.lfr_dir / 'time_seed.dat'])
+        return
 
 
 if __name__ == '__main__':
-    test_g = nx.karate_club_graph()
+    paths = Paths(basedir='../')
 
-    # test_g = nx.barbell_graph(4, 5)
-    # test_g = nx.erdos_renyi_graph(n=20, p=0.75, seed=0)
+    # for avg_k in [15, 20, 25]:
+    #     for mu in np.linspace(0, 1, 21):
+    #         lfr = LFRGraph(paths=paths, n=1000, mu=mu, avg_k=avg_k)
+    #         lfr.generate_graphs(num_graphs=20)
 
-    methods = ('graph-walk_cont', 'graph-walk_disc', 'random-walk_cont', 'random-walk_disc', 'diffusion_cont')
-    for method in methods:
-        corr_cluster_old = CorrelationClustering(input_g=test_g, method=method, old=True)
-        corr_cluster_new = CorrelationClustering(input_g=test_g, method=method, old=False)
-
-        assert np.allclose(corr_cluster_old.R0, corr_cluster_new.R0), f'{method!r} R0 mismatch'
-        if corr_cluster_old.R1 is not None and corr_cluster_new.R1 is not None:
-            if not np.allclose(corr_cluster_old.R1, corr_cluster_new.R1):
-                print(f'{method!r} R1 mismatch')
-        # if not np.isclose(corr_cluster_old.tau_max, corr_cluster_new.tau_max):
-        #     print(f'{method!r} tau mismatch')
+    avg_k = 15
+    mu = 0.2
+    lfr = LFRGraph(paths=paths, n=1000, mu=mu, avg_k=avg_k)
+    g, clustering = lfr.get_graph_and_clustering(trial=1)
+    print(nx.info(g), len(clustering.communities))
+    print(list(g.nodes(data=True))[: 2])

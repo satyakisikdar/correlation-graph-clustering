@@ -24,12 +24,15 @@ from src.utils import Paths, plot_network_clusters, write_clustering, remove_fil
 
 
 class BaseClustering:
-    def __init__(self, paths: Paths, name: str, lfr_graph, method: str):
+    def __init__(self, paths: Paths, input_graph: nx.Graph,
+                 ground_truth_clustering: NodeClustering, method: str):
         self.paths = paths
-        self.name = name
         self.method = method
-        self.lfr_graph = lfr_graph
-        self.output_cluster_base = self.paths.results_dir / self.name / self.method
+        self.input_graph = input_graph
+        assert input_graph.name != '', f'Input graph name is blank.'
+        self.name = input_graph.name
+        self.ground_truth_clustering = ground_truth_clustering
+        self.output_cluster_base = self.paths.results_dir / 'LFR' / self.method
         return
 
     @abc.abstractmethod
@@ -38,16 +41,18 @@ class BaseClustering:
 
     def write_stats(self, stats_dict, stats_path):
         file_exists = stats_path.exists()
+        round_cols = ['mu', 'running_time', 'modularity', 'NMI', 'AMI']
 
         if isinstance(self, CorrelationClustering):
-            columns = ['timestamp', 'name', 'mu', 'method', 'tau', 'tau_max', 'trial', 'running_time', 'num_clusters',
-                       'modularity',
-                       'NMI', 'AMI', 'output_cluster_path']
+            columns = ['timestamp', 'name', 'mu', 'avg_k', 'max_k',
+                       'method', 'tau', 'tau_max', 'orig_clusters', 'trial', 'running_time',
+                       'num_clusters', 'modularity', 'NMI', 'AMI', 'output_cluster_path']
+            round_cols += ['tau', 'tau_max']
         else:
-            columns = ['timestamp', 'name', 'mu', 'method', 'trial', 'running_time', 'num_clusters',
-                       'modularity', 'NMI', 'AMI', 'output_cluster_path']
+            columns = ['timestamp', 'name', 'mu', 'avg_k', 'max_k',
+                       'method', 'trial', 'orig_clusters',
+                       'running_time', 'num_clusters', 'modularity', 'NMI', 'AMI', 'output_cluster_path']
 
-        round_cols = ['mu', 'running_time', 'modularity', 'NMI', 'AMI']
         for col in round_cols:
             stats_dict[col] = round(stats_dict[col], 4)
 
@@ -63,7 +68,7 @@ class BaseClustering:
         # running the method num_trials many times
         stats_filename = self.paths.results_dir / 'stats_others.csv'
 
-        for trial in range(1, num_trials + 1):
+        for trial in tqdm(range(1, num_trials + 1), desc=f'{self.method!r}'):
             cluster_path = self.output_cluster_base / f'{self.name}_{self.method}_{trial}_clusters.txt'
 
             if cluster_path.exists() and not overwrite:  # clustering already exists
@@ -73,10 +78,16 @@ class BaseClustering:
             tic = time.time()
             generate_clustering = self._run_method()
             time_taken = time.time() - tic
+
+            mu = self.input_graph.graph['mu']
+            avg_k = self.input_graph.graph['avg_k']
+            max_k = self.input_graph.graph['max_k']
+
             clustering_stats = self.get_clustering_stats(generated_clustering=generate_clustering,
-                                                         running_time=time_taken, mu=self.lfr_graph.mu,
+                                                         running_time=time_taken, mu=mu, avg_k=avg_k, max_k=max_k,
                                                          timestamp=datetime.now(), trial=trial,
                                                          output_cluster_path=cluster_path)
+
             self.write_stats(stats_dict=clustering_stats, stats_path=stats_filename)
             write_clustering(clustering=generate_clustering, cluster_path=cluster_path)
 
@@ -85,11 +96,12 @@ class BaseClustering:
     def get_clustering_stats(self, generated_clustering: NodeClustering, **params) -> Dict:
         modularity = generated_clustering.newman_girvan_modularity().score
         num_clusters = len(generated_clustering.communities)
-        nmi = normalized_mutual_information(self.lfr_graph.ground_truth_clustering, generated_clustering).score
-        ami = adjusted_mutual_information(self.lfr_graph.ground_truth_clustering, generated_clustering).score
+        orig_clusters = len(self.ground_truth_clustering.communities)
+        nmi = normalized_mutual_information(self.ground_truth_clustering, generated_clustering).score
+        ami = adjusted_mutual_information(self.ground_truth_clustering, generated_clustering).score
 
         stats = dict(name=self.name, method=self.method, modularity=modularity, num_clusters=num_clusters, NMI=nmi,
-                     AMI=ami)
+                     AMI=ami, orig_clusters=orig_clusters)
         stats.update(params)
         return stats
 
@@ -102,23 +114,25 @@ class CorrelationClustering(BaseClustering):
 
     _METHODS = ['GW', 'RW', 'Diff']  # CL = Correlation leakage, # GW = GraphWalk, RW = RandomWalk, Diff = Diffusion
 
-    def __init__(self, method: str, continuous: bool, paths: Paths, name: str, lfr_graph):
-        super().__init__(paths, name, lfr_graph, method)
+    def __init__(self, method: str, continuous: bool, paths: Paths, input_graph: nx.Graph,
+                 ground_truth_clustering: NodeClustering):
+
+        super().__init__(paths=paths, input_graph=input_graph, ground_truth_clustering=ground_truth_clustering,
+                         method=method)
         assert method in CorrelationClustering._METHODS, f'Incorrect {method!r} pick from {CorrelationClustering._METHODS}'
         self.method = method
-        self.input_g = lfr_graph.input_g
 
         assert isinstance(continuous, bool)
-        self.continuous = continuous  # true if continuous
+        self.is_continuous = continuous  # true if continuous
 
         self.A, self.A_prime, self.d, self.D = self._init_matrices()
         self.R0, self.R1, self.tau_max = self.generate_R_matrices()
         return
 
     def _init_matrices(self):
-        n, m = self.input_g.order(), self.input_g.size()
+        n, m = self.input_graph.order(), self.input_graph.size()
 
-        A = nx.to_scipy_sparse_array(self.input_g, dtype='d', nodelist=list(range(n)))
+        A = nx.to_scipy_sparse_array(self.input_graph, dtype='d', nodelist=list(range(n)))
         d = A @ np.ones((n, 1))  # n x 1 degree vector
         D = scipy.sparse.diags(d.flatten())
 
@@ -127,7 +141,7 @@ class CorrelationClustering(BaseClustering):
 
     def generate_R_matrices(self):
         if self.method == 'GW':
-            if self.continuous:
+            if self.is_continuous:
                 H = -self.A
                 H_prime = -self.A_prime
             else:
@@ -135,15 +149,15 @@ class CorrelationClustering(BaseClustering):
                 H_prime = self.A_prime
 
         elif self.method == 'Diff':
-            if self.continuous:
+            if self.is_continuous:
                 H = self.D - self.A
                 H_prime = self.D - self.A_prime  # D_prime should equal D
             else:
                 raise NotImplementedError()
 
         elif self.method == 'RW':
-            if self.continuous:
-                n = self.input_g.order()
+            if self.is_continuous:
+                n = self.input_graph.order()
                 I = scipy.sparse.eye(n, n)
                 D_inv = scipy.sparse.diags((1 / self.d).flatten())
 
@@ -160,7 +174,7 @@ class CorrelationClustering(BaseClustering):
         tau_max = 1 / abs(scipy.sparse.linalg.eigs(H, k=1)[0][0])  # to make sure it's non-negative
         H_t, H_prime_t = H.transpose(), H_prime.transpose()
 
-        if self.continuous:  # discrete method
+        if self.is_continuous:  # discrete method
             R0 = H + H_t - H_prime - H_prime_t
 
             R1 = (H @ H + H_t @ H_t + 2 * H @ H_t) \
@@ -174,14 +188,15 @@ class CorrelationClustering(BaseClustering):
         # running the method num_trials many times
         stats_filename = self.paths.results_dir / 'stats_CL.csv'
 
-        if not self.continuous:
+        if not self.is_continuous:
             taus = [0]
         else:
-            taus = np.linspace(0, self.tau_max, 3)
+            taus = np.linspace(0, self.tau_max, 5)
 
-        for trial in tqdm(range(1, num_trials + 1), desc=f'Correlation clustering {self.method}..'):
+        for trial in tqdm(range(1, num_trials + 1), desc=f'Correlation clustering {self.method}..', leave=False):
             for tau in taus:
-                method = f'{self.method}-C' if self.continuous else f'{self.method}-D'
+                method = f'{self.method}-C' if self.is_continuous else f'{self.method}-D'
+
                 cluster_path = self.output_cluster_base / f'{self.name}_{method}_{tau}_{trial}_clusters.txt'
 
                 if cluster_path.exists() and not overwrite:  # clustering already exists
@@ -191,9 +206,14 @@ class CorrelationClustering(BaseClustering):
                 tic = time.time()
                 generated_clustering = self._run_method(tau=tau)
                 time_taken = time.time() - tic
+
+                mu = self.input_graph.graph['mu']
+                avg_k = self.input_graph.graph['avg_k']
+                max_k = self.input_graph.graph['max_k']
+
                 clustering_stats = self.get_clustering_stats(generated_clustering=generated_clustering,
                                                              running_time=time_taken, tau=tau, tau_max=self.tau_max,
-                                                             mu=self.lfr_graph.mu,
+                                                             mu=mu, avg_k=avg_k, max_k=max_k,
                                                              timestamp=datetime.now(), trial=trial,
                                                              output_cluster_path=cluster_path)
                 clustering_stats['method'] = method  # methods with augmented 'D' or 'C"
@@ -257,7 +277,7 @@ class CorrelationClustering(BaseClustering):
                         del communities[current_comm_i_idx]
 
         communities = [list(comm) for comm in communities if len(comm) > 0]
-        clustering = NodeClustering(graph=self.input_g, method_name=self.method, communities=communities)
+        clustering = NodeClustering(graph=self.input_graph, method_name=self.method, communities=communities)
 
         return clustering
 
@@ -276,7 +296,7 @@ class CorrelationClustering(BaseClustering):
                  - 2 * (self.A_prime @ self.A) + 2 * (self.D @ self.A_prime) + 2 * (self.A_prime @ self.D)
 
         elif self.method == 'random-walk_cont':
-            n = self.input_g.order()
+            n = self.input_graph.order()
             # I = scipy.sparse.eye(n, n)
             # D_inv = scipy.sparse.diags((1 / self.d).flatten())
             I = np.eye(n)
@@ -298,7 +318,7 @@ class CorrelationClustering(BaseClustering):
             R1 = None
 
         elif self.method == 'random-walk_disc':
-            n = self.input_g.order()
+            n = self.input_graph.order()
             D_inv = np.eye(n) * (1 / self.d)
             # D_inv = scipy.sparse.diags((1 / self.d).flatten())
             H = self.A @ D_inv
@@ -315,18 +335,18 @@ class CorrelationClustering(BaseClustering):
 
 
 class OtherClustering(BaseClustering):
-    _METHODS = ['louvain', 'greedy_modularity', 'label_propagation']
+    _METHODS = ['louvain', 'greedy_modularity', 'label_propagation', 'infomap', 'leiden', 'eigenvector']
 
-    def __init__(self, paths: Paths, name: str, lfr_graph, method: str):
-        super().__init__(paths, name, lfr_graph, method)
+    def __init__(self, paths: Paths, input_graph: nx.Graph, method: str, ground_truth_clustering: NodeClustering):
+        super().__init__(paths=paths, input_graph=input_graph, method=method,
+                         ground_truth_clustering=ground_truth_clustering)
         self.method = method
         assert method in OtherClustering._METHODS, f'Incorrect method: {method!r}, pick from {OtherClustering._METHODS}'
-        self.input_g = lfr_graph.input_g
         return
 
     def _run_method(self, **params) -> NodeClustering:
         cdlib_alg = getattr(cdlib.algorithms, self.method)
-        clustering = cdlib_alg(self.input_g)
+        clustering = cdlib_alg(self.input_graph)
         return clustering
 
 
@@ -357,7 +377,7 @@ class LFRGraph:
     def plot_clustering(self, method: str = 'ground_truth', ix: int = -1, figsize: Tuple[int, int] = (25, 25),
                         node_size: int = 150, clustering=None):
         if self.pos is None:
-            self.pos = nx.spring_layout(self.input_g, iterations=100)
+            self.pos = nx.spring_layout(self.input_graph, iterations=100)
 
         ncols = 1
         if method == 'ground_truth':
@@ -370,7 +390,7 @@ class LFRGraph:
         modularity = clustering.newman_girvan_modularity().score
         num_clusters = len(clustering.communities)
 
-        title = f'{self.name!r} \t |V| = {self.input_g.order():,} \t |E| = {self.input_g.size():,}\n' \
+        title = f'{self.name!r} \t |V| = {self.input_graph.order():,} \t |E| = {self.input_graph.size():,}\n' \
                 f'method = {method!r} \t clusters = {num_clusters:,} \t modularity = {modularity:.3g}'
 
         if method != 'ground_truth':
@@ -380,7 +400,7 @@ class LFRGraph:
 
         fig, *axs = plt.subplots(figsize=figsize, layout='constrained', ncols=ncols)
 
-        plot_network_clusters(self.input_g, figsize=figsize, node_size=node_size, cmap='tab20',
+        plot_network_clusters(self.input_graph, figsize=figsize, node_size=node_size, cmap='tab20',
                               partition=clustering, position=self.pos, ax=axs[0], title=title)
 
         plt.show()
@@ -389,7 +409,7 @@ class LFRGraph:
     def __str__(self) -> str:
         ground_truth_cluster_count = len(self.ground_truth_clustering.communities)
         ground_truth_modularity = self.ground_truth_clustering.newman_girvan_modularity().score
-        st = f'<{self.name!r} \t |V|={self.input_g.order():,} \t |E| = {self.input_g.size():,} \t ' \
+        st = f'<{self.name!r} \t |V|={self.input_graph.order():,} \t |E| = {self.input_graph.size():,} \t ' \
              f'GT comms: {ground_truth_cluster_count:,} \t GT mod: {ground_truth_modularity:.4g}>'
         return st
 
@@ -410,7 +430,12 @@ class LFRGraph:
     def get_graph_and_clustering(self, trial: int):
         output_graph_path = self.graph_basepath / f'{self.name}_{trial}.gml'
         lfr_g = nx.read_gml(output_graph_path, destringizer=int)
-        lfr_g.name = self.name
+
+        # set graph level attributes
+        lfr_g.name = self.name + f'_{trial}'  # add trial number for output
+        lfr_g.graph['mu'] = self.mu
+        lfr_g.graph['avg_k'] = self.avg_k
+        lfr_g.graph['max_k'] = self.max_k
 
         ground_truth_labels = nx.get_node_attributes(lfr_g, name='ground_truth')
         clusters_dict = {}  # key: community label, value: list of member nodes
@@ -473,6 +498,17 @@ if __name__ == '__main__':
     avg_k = 15
     mu = 0.2
     lfr = LFRGraph(paths=paths, n=1000, mu=mu, avg_k=avg_k)
-    g, clustering = lfr.get_graph_and_clustering(trial=1)
-    print(nx.info(g), len(clustering.communities))
+    g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=1)
+    print(nx.info(g), len(ground_truth_clustering.communities))
     print(list(g.nodes(data=True))[: 2])
+
+    # method = 'GW'
+    # is_continuous = True
+    # corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=is_continuous, method=method,
+    #                                      ground_truth_clustering=ground_truth_clustering)
+    #
+    # corr_cluster.run(num_trials=1, overwrite=True)
+
+    other_clustering = OtherClustering(paths=paths, input_graph=g, ground_truth_clustering=ground_truth_clustering,
+                                       method='leiden')
+    other_clustering.run(num_trials=1, overwrite=True)

@@ -1,14 +1,16 @@
 """Main driver"""
 
 import subprocess
+import sys
 from pathlib import Path
 
 import networkx as nx
 import numpy as np
-from tqdm.auto import tqdm
 
-from src.clustering import LFRGraph, CorrelationClustering
-from src.utils import Paths, remove_files
+from src.clustering import LFRGraph, CorrelationClustering, OtherClustering
+from src.utils import Paths, remove_files, parallel_async
+
+sys.path.extend(['./', '../'])
 
 
 def generate_LFR(paths: Paths, LFR_source: str = './LFR', n: int = 1000, mu: float = 0.25, overwrite: bool = False):
@@ -82,49 +84,87 @@ def corr_tester():
     return
 
 
-def other_methods_runner():
+def corr_cluster_runner(mu, avg_k, trial, method, continuous):
     paths = Paths(basedir='./')
-    n = 10000
-    mus = np.linspace(0, 1, 21)
-    for mu in mus:
-        lfr_graph = LFRGraph(paths=paths, n=n, mu=mu)
-        methods = ['sbm_dl', 'original', 'leiden', 'louvain', 'label_propagation', 'greedy_modularity']
-
-        with tqdm(total=len(methods), desc='Running algorithms...', leave=True) as pbar:
-            for method in methods:
-                pbar.set_description(f'Mu: {mu:.2f} Method: {method!r}')
-                try:
-                    lfr_graph.run_method(method=method, num_trials=10)
-                except Exception as e:
-                    print(e)
-                pbar.update(1)
-
+    lfr = LFRGraph(mu=mu, paths=paths, n=1000, avg_k=avg_k)
+    input_g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=trial)
+    clustering_method = CorrelationClustering(input_graph=input_g,
+                                              ground_truth_clustering=ground_truth_clustering,
+                                              method=method, continuous=continuous, paths=paths)
+    clustering_method.run(num_trials=10, overwrite=False)
     return
 
 
-def main():
+def other_methods_runner(mu, avg_k, trial, method):
     paths = Paths(basedir='./')
-    # method = 'label_propagation'
-    # clustering_method = OtherClustering(lfr_graph=lfr_g, method=method, name=lfr_g.name,
-    #                                     paths=paths)
+    lfr = LFRGraph(mu=mu, paths=paths, n=1000, avg_k=avg_k)
+    input_g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=trial)
+    other_clustering = OtherClustering(paths=paths, input_graph=input_g,
+                                       ground_truth_clustering=ground_truth_clustering,
+                                       method=method)
+    other_clustering.run(num_trials=10, overwrite=False)
+    return
 
+
+def other_methods():
+    num_workers = 5
+    args = []
     mus = np.linspace(0, 1, 21)
-    for mu in tqdm(mus):
-        lfr_g = LFRGraph(mu=mu, paths=paths, n=1000)
-        methods = 'GW', 'RW', 'Diff'
-        for method in tqdm(methods):
-            for continuous in [True, False]:
-                if method == 'Diff' and not continuous:
-                    continue
-                clustering_method = CorrelationClustering(lfr_graph=lfr_g, method=method, continuous=continuous,
-                                                          name=lfr_g.name, paths=paths)
-                clustering_method.run(num_trials=10, overwrite=True)
+    for mu in mus:
+        for avg_k in (15, 20, 25):
+            for trial in range(1, 21):
+                methods = ['louvain', 'greedy_modularity', 'label_propagation', 'infomap', 'leiden', 'eigenvector']
+                for method in methods:
+                    args.append((mu, avg_k, trial, method))
 
+    parallel_async(func=other_methods_runner, args=args, num_workers=num_workers)
+    return
+
+
+def corr_cluster():
+    num_workers = 10
+    args = []
+    mus = np.linspace(0, 1, 21)
+    for mu in mus:
+        for avg_k in (15, 20, 25):
+            for trial in range(1, 21):
+                methods = 'GW', 'RW', 'Diff'
+                for method in methods:
+                    for continuous in [True, False]:
+                        if method == 'Diff' and not continuous:
+                            continue
+                        args.append((mu, avg_k, trial, method, continuous))
+
+    parallel_async(func=corr_cluster_runner, args=args, num_workers=num_workers)
     return
 
 
 if __name__ == '__main__':
+    other_methods()
+
+    # main()
+    # for avg_k in [15, 20, 25]:
+    #     for mu in np.linspace(0, 1, 21):
+    #         lfr = LFRGraph(paths=paths, n=1000, mu=mu, avg_k=avg_k)
+    #         lfr.generate_graphs(num_graphs=20)
+
+    # avg_k = 15
+    # mu = 0.2
+    # lfr = LFRGraph(paths=paths, n=1000, mu=mu, avg_k=avg_k)
+    # g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=1)
+    # print(nx.info(g), len(ground_truth_clustering.communities))
+    # print(list(g.nodes(data=True))[: 2])
+
+    # method = 'GW'
+    # is_continuous = True
+    # corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=is_continuous, method=method,
+    #                                      ground_truth_clustering=ground_truth_clustering)
+    #
+    # corr_cluster.run(num_trials=1, overwrite=True)
+
+    # other_clustering = OtherClustering(paths=paths, input_graph=g, ground_truth_clustering=ground_truth_clustering,
+    #                                    method='leiden')
+    # other_clustering.run(num_trials=1, overwrite=True)
     # corr_tester()
     # other_methods_runner()
     # LFR_runner()
-    main()

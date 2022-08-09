@@ -3,6 +3,7 @@ General utilities file
 """
 import os
 import warnings
+from multiprocessing import Pool
 from pathlib import Path
 from typing import Union
 
@@ -23,6 +24,26 @@ class Paths:
 
         self.lfr_dir: Path = self.basedir / 'LFR'
         return
+
+
+def parallel_async(func, args, num_workers=10):
+    def update_result(result):
+        return result
+
+    results = []
+    async_promises = []
+    with Pool(num_workers) as pool:
+        for arg in args:
+            r = pool.apply_async(func, arg, callback=update_result)
+            async_promises.append(r)
+        for r in async_promises:
+            try:
+                r.wait()
+                results.append(r.get())
+            except Exception as e:
+                results.append(r.get())
+
+    return results
 
 
 def remove_files(files):

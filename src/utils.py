@@ -2,6 +2,7 @@
 General utilities file
 """
 import os
+import platform
 import warnings
 from multiprocessing import Pool
 from pathlib import Path
@@ -17,9 +18,12 @@ from matplotlib import pyplot as plt
 
 
 class Paths:
-    def __init__(self, basedir='../'):
-        self.basedir: Path = Path(basedir)
-        self.data_dir: Path = self.basedir / 'data'
+    def __init__(self, basedir='./'):
+        if platform.system() == 'Darwin':
+            self.basedir: Path = Path.home() / 'data-dump/corr-cluster'
+        else:
+            self.basedir: Path = Path('/N/slate/ssikdar/data-dump/corr-cluster')
+        self.data_dir: Path = self.basedir / 'input'
         self.results_dir: Path = self.basedir / 'results'
 
         self.lfr_dir: Path = self.basedir / 'LFR'
@@ -60,7 +64,7 @@ def plot_network_clusters(
         title: str = None,
         position: dict = None,
         figsize: tuple = (8, 8),
-        node_size: int = 200,
+        node_size: int = 100,
         plot_overlaps: bool = False,
         plot_labels: bool = False,
         cmap: object = None,
@@ -97,17 +101,18 @@ def plot_network_clusters(
         )
 
     if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
+        fig, ax = plt.subplots(figsize=figsize, layout='tight')
 
-    ax.axis('off')
+    # ax.axis('off')
 
-    if title is None:
-        modularity = partition.newman_girvan_modularity().score
-        title = f'{graph.name!r} \t |V| = {graph.order():,} \t |E| = {graph.size():,}\n' \
-                f'method = {partition.method_name!r} \t clusters = {len(partition.communities):,} \t modularity = {modularity:.4g}'
+    # if title is None:
+    #     modularity = partition.newman_girvan_modularity().score
+    #     title = f'{graph.name!r} \t |V| = {graph.order():,} \t |E| = {graph.size():,}\n' \
+    #             f'method = {partition.method_name!r} \t clusters = {len(partition.communities):,} \t modularity = {modularity:.4g}'
 
-    title = title.replace('\t', '    ')
-    ax.set_title(title, fontsize=40)
+    if title is not None:
+        title = title.replace('\t', '    ')
+        ax.set_title(title, fontsize=40)
 
     partition = __filter(partition.communities, top_k, min_size)
     graph = convert_graph_formats(graph, nx.Graph)
@@ -177,6 +182,9 @@ def plot_network_clusters(
                 node_size=size,
                 nodelist=partition[i],
                 node_color=[cmap(_norm(i))],
+                margins=0,
+                edgecolors='white',
+                linewidths=2,
             )
             # fig.set_edgecolor("k")
     if plot_labels:
@@ -190,7 +198,7 @@ def plot_network_clusters(
                     labels={node: str(node) for node in partition[i]},
                 )
 
-    return
+    return ax
 
 
 def write_clustering(clustering: NodeClustering, cluster_path: Union[str, Path]):

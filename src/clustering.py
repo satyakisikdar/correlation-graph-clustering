@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Tuple, Dict
 
 import cdlib
@@ -66,7 +67,7 @@ class BaseClustering:
 
     def run(self, num_trials: int, overwrite: bool):
         # running the method num_trials many times
-        stats_filename = self.paths.results_dir / 'stats_others.csv'
+        stats_filename = Path('./stats_others.csv')
 
         for trial in tqdm(range(1, num_trials + 1), desc=f'{self.method!r}'):
             cluster_path = self.output_cluster_base / f'{self.name}_{self.method}_{trial}_clusters.txt'
@@ -115,7 +116,7 @@ class CorrelationClustering(BaseClustering):
     _METHODS = ['GW', 'RW', 'Diff']  # CL = Correlation leakage, # GW = GraphWalk, RW = RandomWalk, Diff = Diffusion
 
     def __init__(self, method: str, continuous: bool, paths: Paths, input_graph: nx.Graph,
-                 ground_truth_clustering: NodeClustering):
+                 ground_truth_clustering: NodeClustering, exact: bool = False):
 
         super().__init__(paths=paths, input_graph=input_graph, ground_truth_clustering=ground_truth_clustering,
                          method=method)
@@ -124,34 +125,32 @@ class CorrelationClustering(BaseClustering):
 
         assert isinstance(continuous, bool)
         self.is_continuous = continuous  # true if continuous
+        self.exact = exact  # exact computation of R
+        self._init_matrices()
 
-        self.A, self.A_prime, self.d, self.D = self._init_matrices()
-        self.R0, self.R1, self.tau_max = self.generate_R_matrices()
         return
 
     def _init_matrices(self):
         n, m = self.input_graph.order(), self.input_graph.size()
 
-        A = nx.to_scipy_sparse_array(self.input_graph, dtype='d', nodelist=list(range(n)))
-        d = A @ np.ones((n, 1))  # n x 1 degree vector
-        D = scipy.sparse.diags(d.flatten())
+        self.A = nx.to_scipy_sparse_array(self.input_graph, dtype='d', nodelist=sorted(self.input_graph.nodes()))
+        self.d = self.A @ np.ones((n, 1))  # n x 1 degree vector
+        self.D = scipy.sparse.diags(self.d.flatten())
 
-        A_prime = (d @ np.transpose(d)) / (2 * m)  # null model
-        return A, A_prime, d, D
+        self.A_prime = (self.d @ np.transpose(self.d)) / (2 * m)  # null model
 
-    def generate_R_matrices(self):
         if self.method == 'GW':
             if self.is_continuous:
-                H = -self.A
-                H_prime = -self.A_prime
+                self.H = -self.A
+                self.H_prime = -self.A_prime
             else:
-                H = self.A
-                H_prime = self.A_prime
+                self.H = self.A
+                self.H_prime = self.A_prime
 
         elif self.method == 'Diff':
             if self.is_continuous:
-                H = self.D - self.A
-                H_prime = self.D - self.A_prime  # D_prime should equal D
+                self.H = self.D - self.A
+                self.H_prime = self.D - self.A_prime  # D_prime should equal D
             else:
                 raise NotImplementedError()
 
@@ -161,18 +160,22 @@ class CorrelationClustering(BaseClustering):
                 I = scipy.sparse.eye(n, n)
                 D_inv = scipy.sparse.diags((1 / self.d).flatten())
 
-                H = I - (self.A @ D_inv)
-                H_prime = I - (self.A_prime @ D_inv)  # I_prime and D_inv_prime should be the same
+                self.H = I - (self.A @ D_inv)
+                self.H_prime = I - (self.A_prime @ D_inv)  # I_prime and D_inv_prime should be the same
 
             else:
                 D_inv = scipy.sparse.diags((1 / self.d).flatten())
-                H = self.A @ D_inv
-                H_prime = self.A_prime @ D_inv
+                self.H = self.A @ D_inv
+                self.H_prime = self.A_prime @ D_inv
         else:
             raise Exception()
 
-        tau_max = 1 / abs(scipy.sparse.linalg.eigs(H, k=1)[0][0])  # to make sure it's non-negative
-        H_t, H_prime_t = H.transpose(), H_prime.transpose()
+        self.tau_max = 1 / abs(scipy.sparse.linalg.eigs(self.H, k=1)[0][0])  # to make sure it's non-negative
+        return
+
+    def generate_R_matrix(self, tau: float = None):
+        H, H_prime = self.H, self.H_prime
+        H_t, H_prime_t = self.H.transpose(), self.H_prime.transpose()
 
         if self.is_continuous:  # discrete method
             R0 = H + H_t - H_prime - H_prime_t
@@ -182,59 +185,75 @@ class CorrelationClustering(BaseClustering):
         else:
             R0 = -H @ H_t + H_prime @ H_prime_t
             R1 = None
-        return R0, R1, tau_max
 
-    def run(self, num_trials: int, overwrite: bool):
+        if self.exact:
+            U = scipy.sparse.linalg.expm(-tau * H)
+            U = U @ U.transpose()
+            R = H @ U + U @ H_t - H_prime @ U - U @ H_prime_t
+        else:
+            if R1 is not None:
+                R = R0 - (tau * R1)
+            else:
+                R = R0
+        return R
+
+    def run(self, num_trials: int, overwrite: bool, write_stats: bool = True):
         # running the method num_trials many times
         stats_filename = self.paths.results_dir / 'stats_CL.csv'
 
         if not self.is_continuous:
-            taus = [0]
+            taus = [-1]
         else:
             taus = np.linspace(0, self.tau_max, 5)
+        clusterings = []
+        for tau in taus:
+            R = self.generate_R_matrix(tau=tau)
 
-        for trial in tqdm(range(1, num_trials + 1), desc=f'Correlation clustering {self.method}..', leave=False):
-            for tau in taus:
-                method = f'{self.method}-C' if self.is_continuous else f'{self.method}-D'
+            for trial in tqdm(range(1, num_trials + 1), desc=f'Correlation clustering {self.method}..', leave=False):
+                method_ = f'{self.method}-C' if self.is_continuous else f'{self.method}-D'
+                method = f'{method_}-exact' if self.exact else method_
 
                 cluster_path = self.output_cluster_base / f'{self.name}_{method}_{tau}_{trial}_clusters.txt'
 
                 if cluster_path.exists() and not overwrite:  # clustering already exists
-                    print(f'Existing clustering found {self.method!r} {self.name!r} {trial}')
+                    print(f'Existing clustering found {method!r} {self.name!r}')
                     continue
 
                 tic = time.time()
-                generated_clustering = self._run_method(tau=tau)
+                generated_clustering = self._run_method(R=R)
+                generated_clustering.method_parameters = {'tau': tau, 'tau_max': self.tau_max}
                 time_taken = time.time() - tic
 
-                mu = self.input_graph.graph['mu']
-                avg_k = self.input_graph.graph['avg_k']
-                max_k = self.input_graph.graph['max_k']
+                mu = self.input_graph.graph.get('mu', np.nan)
+                avg_k = self.input_graph.graph.get('avg_k', np.nan)
+                max_k = self.input_graph.graph.get('max_k', np.nan)
 
-                clustering_stats = self.get_clustering_stats(generated_clustering=generated_clustering,
-                                                             running_time=time_taken, tau=tau, tau_max=self.tau_max,
-                                                             mu=mu, avg_k=avg_k, max_k=max_k,
-                                                             timestamp=datetime.now(), trial=trial,
-                                                             output_cluster_path=cluster_path)
-                clustering_stats['method'] = method  # methods with augmented 'D' or 'C"
-                self.write_stats(stats_dict=clustering_stats, stats_path=stats_filename)
-                write_clustering(clustering=generated_clustering, cluster_path=cluster_path)
-        return
+                if write_stats:
+                    clustering_stats = self.get_clustering_stats(generated_clustering=generated_clustering,
+                                                                 running_time=time_taken, tau=tau, tau_max=self.tau_max,
+                                                                 mu=mu, avg_k=avg_k, max_k=max_k,
+                                                                 timestamp=datetime.now(), trial=trial,
+                                                                 output_cluster_path=cluster_path)
+                    clustering_stats['method'] = method  # methods with augmented 'D' or 'C"
+                    self.write_stats(stats_dict=clustering_stats, stats_path=stats_filename)
+                    write_clustering(clustering=generated_clustering, cluster_path=cluster_path)
+                clusterings.append(generated_clustering)
+        return clusterings
 
-    def _run_method(self, **params):
-        if self.R1 is None:
-            R = self.R0
-        else:
-            tau = params['tau']
-            R = self.R0 - (tau * self.R1)
+    def _run_method(self, R):
+        """
+        R is the quality matrix
+        """
         R = R * -1  # to maximize
 
         n = R.shape[0]
-        communities = [{u} for u in range(n)]  # list of sets
+        communities = [{u} for u in self.input_graph.nodes()]  # list of sets
+
+        mapping = {u: i for i, u in enumerate(sorted(self.input_graph.nodes()))}
 
         iters = 0
         changed = True
-        nodes = list(range(n))
+        nodes = list(self.input_graph.nodes())
         random.shuffle(nodes)
 
         while changed:
@@ -247,7 +266,7 @@ class CorrelationClustering(BaseClustering):
                 loss_i_from_current_comm = 0  # loss from i leaving its current comm
                 for j in communities[current_comm_i_idx]:  # members of i's community
                     if i != j:
-                        loss_i_from_current_comm -= R[i, j]
+                        loss_i_from_current_comm -= R[mapping[i], mapping[j]]
 
                 new_comm_i = None
                 gain_i_to_new_comm = 0
@@ -259,7 +278,7 @@ class CorrelationClustering(BaseClustering):
                         continue
                     g = 0
                     for j in community:  # j is from a different community
-                        g += R[i, j]
+                        g += R[mapping[i], mapping[j]]
 
                     if g > gain_i_to_new_comm:
                         gain_i_to_new_comm = g
@@ -280,58 +299,6 @@ class CorrelationClustering(BaseClustering):
         clustering = NodeClustering(graph=self.input_graph, method_name=self.method, communities=communities)
 
         return clustering
-
-    def generate_R_matrices_old(self):
-        if self.method == 'graph-walk_cont':
-            H = -self.A
-            R0 = -2 * (self.A - self.A_prime)  # eq 15
-            R1 = 4 * (self.A @ self.A) - 2 * (self.A_prime @ self.A + self.A @ self.A_prime)
-
-        elif self.method == 'diffusion_cont':
-            H = self.D - self.A
-            R0 = -2 * (self.A - self.A_prime)
-
-            # eq 22
-            R1 = 4 * (self.A @ self.A) - 2 * (self.D @ self.A) - 2 * (self.A @ self.D) - 2 * (self.A @ self.A_prime) \
-                 - 2 * (self.A_prime @ self.A) + 2 * (self.D @ self.A_prime) + 2 * (self.A_prime @ self.D)
-
-        elif self.method == 'random-walk_cont':
-            n = self.input_graph.order()
-            # I = scipy.sparse.eye(n, n)
-            # D_inv = scipy.sparse.diags((1 / self.d).flatten())
-            I = np.eye(n)
-            D_inv = np.eye(n) * (1 / self.d)
-
-            H = I - (self.A @ D_inv)
-            R0 = -1 * (self.A - self.A_prime) @ D_inv - D_inv @ (self.A - self.A_prime)
-
-            # eq 32
-            R1 = (self.A @ D_inv @ self.A @ D_inv) + (D_inv @ self.A @ D_inv @ self.A) \
-                 + (self.A @ D_inv @ D_inv @ self.A) + (D_inv @ self.A @ self.A @ D_inv) \
-                 - (self.A_prime @ D_inv @ self.A @ D_inv) - (self.A_prime @ D_inv @ D_inv @ self.A) \
-                 - (self.A @ D_inv @ D_inv @ self.A_prime) - (D_inv @ self.A @ D_inv @ self.A_prime) - (2 * R0)
-
-        elif self.method == 'graph-walk_disc':
-            H = self.A
-            # eq 38
-            R0 = (-self.A @ self.A) + (self.A_prime @ self.A_prime)
-            R1 = None
-
-        elif self.method == 'random-walk_disc':
-            n = self.input_graph.order()
-            D_inv = np.eye(n) * (1 / self.d)
-            # D_inv = scipy.sparse.diags((1 / self.d).flatten())
-            H = self.A @ D_inv
-
-            R0 = -(self.A @ D_inv @ D_inv @ self.A) + (self.A_prime @ D_inv @ D_inv @ self.A_prime)
-            R1 = None
-
-        else:
-            raise NotImplementedError()
-
-        # tau_max = 1 / abs(scipy.sparse.linalg.eigsh(H, k=1)[0][0])  # to make sure it's non-negative
-        tau_max = -1  # change later
-        return R0, R1, tau_max
 
 
 class OtherClustering(BaseClustering):
@@ -489,26 +456,23 @@ class LFRGraph:
 
 if __name__ == '__main__':
     paths = Paths(basedir='../')
-
-    # for avg_k in [15, 20, 25]:
-    #     for mu in np.linspace(0, 1, 21):
-    #         lfr = LFRGraph(paths=paths, n=1000, mu=mu, avg_k=avg_k)
-    #         lfr.generate_graphs(num_graphs=20)
-
-    avg_k = 15
-    mu = 0.2
+    avg_k = 20
+    mu = 0.4
     lfr = LFRGraph(paths=paths, n=1000, mu=mu, avg_k=avg_k)
     g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=1)
-    print(nx.info(g), len(ground_truth_clustering.communities))
-    print(list(g.nodes(data=True))[: 2])
 
-    # method = 'GW'
-    # is_continuous = True
-    # corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=is_continuous, method=method,
-    #                                      ground_truth_clustering=ground_truth_clustering)
-    #
-    # corr_cluster.run(num_trials=1, overwrite=True)
+    methods = ['GW', 'RW', 'Diff']
+    # methods = ['RW']
+    for method in methods:
+        is_continuous = True
+        corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=is_continuous, method=method,
+                                             ground_truth_clustering=ground_truth_clustering)
 
-    other_clustering = OtherClustering(paths=paths, input_graph=g, ground_truth_clustering=ground_truth_clustering,
-                                       method='leiden')
-    other_clustering.run(num_trials=1, overwrite=True)
+        tau_max = corr_cluster.tau_max
+        for tau in np.linspace(0, tau_max, 5):
+            approx_R = corr_cluster.generate_R_matrix(compute_exact=False, tau=tau)
+            exact_R = corr_cluster.generate_R_matrix(compute_exact=True, tau=tau)
+
+            print(method, is_continuous, tau.round(4), np.abs(approx_R - exact_R).mean().round(4),
+                  np.diag(np.abs(approx_R - exact_R)).mean().round(4), )
+        print()

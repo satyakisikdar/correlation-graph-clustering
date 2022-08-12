@@ -71,27 +71,14 @@ def LFR_runner():
     return
 
 
-def corr_tester():
-    paths = Paths(basedir='./')
-    methods = ('graph-walk_cont', 'graph-walk_disc', 'random-walk_cont', 'random-walk_disc', 'diffusion_cont')
-    n = 10_000
-    mus = np.linspace(0, 1, 21)
-    # mus = [0.1]
-    for mu in mus:
-        for method in methods:
-            lfr_graph = LFRGraph(paths=paths, n=n, mu=mu)
-            lfr_graph.run_correlation_clustering(method=method, num_trials=5, overwrite=False)
-    return
-
-
-def corr_cluster_runner(mu, avg_k, trial, method, continuous):
+def corr_cluster_runner(mu, avg_k, trial, method, continuous, exact):
     paths = Paths(basedir='./')
     lfr = LFRGraph(mu=mu, paths=paths, n=1000, avg_k=avg_k)
     input_g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=trial)
     clustering_method = CorrelationClustering(input_graph=input_g,
                                               ground_truth_clustering=ground_truth_clustering,
-                                              method=method, continuous=continuous, paths=paths)
-    clustering_method.run(num_trials=10, overwrite=False)
+                                              method=method, continuous=continuous, paths=paths, exact=exact)
+    clustering_method.run(num_trials=5, overwrite=False)
     return
 
 
@@ -109,22 +96,26 @@ def other_methods_runner(mu, avg_k, trial, method):
 def other_methods():
     num_workers = 5
     args = []
+    exact = True
     mus = np.linspace(0, 1, 21)
     for mu in mus:
         for avg_k in (15, 20, 25):
             for trial in range(1, 21):
-                methods = ['louvain', 'greedy_modularity', 'label_propagation', 'infomap', 'leiden', 'eigenvector']
+                methods = ['louvain', 'greedy_modularity', 'label_propagation', 'infomap', 'leiden', 'eigenvector'][
+                          : -1]
                 for method in methods:
-                    args.append((mu, avg_k, trial, method))
+                    args.append((mu, avg_k, trial, method, exact))
 
     parallel_async(func=other_methods_runner, args=args, num_workers=num_workers)
     return
 
 
 def corr_cluster():
-    num_workers = 10
+    num_workers = 12
     args = []
     mus = np.linspace(0, 1, 21)
+    exact = True
+
     for mu in mus:
         for avg_k in (15, 20, 25):
             for trial in range(1, 21):
@@ -133,34 +124,41 @@ def corr_cluster():
                     for continuous in [True, False]:
                         if method == 'Diff' and not continuous:
                             continue
-                        args.append((mu, avg_k, trial, method, continuous))
+                        if exact and not continuous:  # exact calculation only needed for continuous methods
+                            continue
+                        args.append((mu, avg_k, trial, method, continuous, exact))
+                        break
 
     parallel_async(func=corr_cluster_runner, args=args, num_workers=num_workers)
     return
 
 
 if __name__ == '__main__':
-    other_methods()
+    # print('hello')
+    # paths = Paths()
+    # print(paths.data_dir)
+    corr_cluster()
+    # other_methods()
 
     # main()
     # for avg_k in [15, 20, 25]:
     #     for mu in np.linspace(0, 1, 21):
     #         lfr = LFRGraph(paths=paths, n=1000, mu=mu, avg_k=avg_k)
     #         lfr.generate_graphs(num_graphs=20)
-
+    # paths = Paths(basedir='./')
     # avg_k = 15
-    # mu = 0.2
+    # mu = 0.4
     # lfr = LFRGraph(paths=paths, n=1000, mu=mu, avg_k=avg_k)
-    # g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=1)
+    # g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=15)
     # print(nx.info(g), len(ground_truth_clustering.communities))
-    # print(list(g.nodes(data=True))[: 2])
-
+    # # print(list(g.nodes(data=True))[: 2])
+    # #
     # method = 'GW'
     # is_continuous = True
     # corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=is_continuous, method=method,
-    #                                      ground_truth_clustering=ground_truth_clustering)
+    #                                      ground_truth_clustering=ground_truth_clustering, exact=True)
     #
-    # corr_cluster.run(num_trials=1, overwrite=True)
+    # corr_cluster.run(num_trials=1, overwrite=False)
 
     # other_clustering = OtherClustering(paths=paths, input_graph=g, ground_truth_clustering=ground_truth_clustering,
     #                                    method='leiden')

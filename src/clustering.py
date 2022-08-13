@@ -186,7 +186,7 @@ class CorrelationClustering(BaseClustering):
             R0 = -H @ H_t + H_prime @ H_prime_t
             R1 = None
 
-        if self.exact:
+        if self.exact and self.is_continuous:  # do not use this for discrete methods
             U = scipy.sparse.linalg.expm(-tau * H)
             U = U @ U.transpose()
             R = H @ U + U @ H_t - H_prime @ U - U @ H_prime_t
@@ -205,9 +205,12 @@ class CorrelationClustering(BaseClustering):
             taus = [-1]
         else:
             taus = np.linspace(0, self.tau_max, 5)
-        clusterings = []
+        clusterings = {}
         for tau in taus:
             R = self.generate_R_matrix(tau=tau)
+
+            if tau not in clusterings:
+                clusterings[tau] = []
 
             for trial in tqdm(range(1, num_trials + 1), desc=f'Correlation clustering {self.method}..', leave=False):
                 method_ = f'{self.method}-C' if self.is_continuous else f'{self.method}-D'
@@ -221,14 +224,15 @@ class CorrelationClustering(BaseClustering):
 
                 tic = time.time()
                 generated_clustering = self._run_method(R=R)
-                generated_clustering.method_parameters = {'tau': tau, 'tau_max': self.tau_max}
                 time_taken = time.time() - tic
-
-                mu = self.input_graph.graph.get('mu', np.nan)
-                avg_k = self.input_graph.graph.get('avg_k', np.nan)
-                max_k = self.input_graph.graph.get('max_k', np.nan)
+                generated_clustering.method_parameters = {'tau': tau, 'tau_max': self.tau_max, 'trial': trial}
+                clusterings[tau].append(generated_clustering)
 
                 if write_stats:
+                    mu = self.input_graph.graph.get('mu', np.nan)
+                    avg_k = self.input_graph.graph.get('avg_k', np.nan)
+                    max_k = self.input_graph.graph.get('max_k', np.nan)
+
                     clustering_stats = self.get_clustering_stats(generated_clustering=generated_clustering,
                                                                  running_time=time_taken, tau=tau, tau_max=self.tau_max,
                                                                  mu=mu, avg_k=avg_k, max_k=max_k,
@@ -237,7 +241,7 @@ class CorrelationClustering(BaseClustering):
                     clustering_stats['method'] = method  # methods with augmented 'D' or 'C"
                     self.write_stats(stats_dict=clustering_stats, stats_path=stats_filename)
                     write_clustering(clustering=generated_clustering, cluster_path=cluster_path)
-                clusterings.append(generated_clustering)
+
         return clusterings
 
     def _run_method(self, R):

@@ -14,6 +14,8 @@ import numpy as np
 from cdlib import NodeClustering
 from cdlib.utils import convert_graph_formats
 from cdlib.viz.networks import __filter, COLOR
+from clusim.clusimelement import element_sim
+from clusim.clustering import Clustering
 from matplotlib import pyplot as plt
 
 
@@ -28,6 +30,16 @@ class Paths:
 
         self.lfr_dir: Path = self.basedir / 'LFR'
         return
+
+
+def clusim_ec_score(clustering_1: NodeClustering, clustering_2: NodeClustering):
+    """
+    Use the Clusim package to calculate EC score
+    """
+    clu_dict1 = {i: clusters for i, clusters in enumerate(clustering_1.communities)}
+    clu_dict2 = {i: clusters for i, clusters in enumerate(clustering_2.communities)}
+
+    return element_sim(Clustering(clu2elm_dict=clu_dict1), Clustering(clu2elm_dict=clu_dict2))
 
 
 def parallel_async(func, args, num_workers=10):

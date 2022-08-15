@@ -6,7 +6,6 @@ import subprocess
 import sys
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Tuple, Dict
 
 import cdlib
@@ -46,9 +45,9 @@ class BaseClustering:
 
         if isinstance(self, CorrelationClustering):
             columns = ['timestamp', 'name', 'mu', 'avg_k', 'max_k',
-                       'method', 'tau', 'tau_max', 'orig_clusters', 'trial', 'running_time',
-                       'num_clusters', 'modularity', 'NMI', 'AMI', 'EC', 'output_cluster_path']
-            round_cols += ['tau', 'tau_max']
+                       'method', 'tau_max', 'tau_ix', 'tau', 'orig_clusters', 'trial', 'running_time',
+                       'num_clusters', 'before_merge', 'modularity', 'NMI', 'AMI', 'EC', 'output_cluster_path']
+            round_cols += ['tau_max']
         else:
             columns = ['timestamp', 'name', 'mu', 'avg_k', 'max_k',
                        'method', 'trial', 'orig_clusters',
@@ -67,13 +66,13 @@ class BaseClustering:
 
     def run(self, num_trials: int, overwrite: bool):
         # running the method num_trials many times
-        stats_filename = Path('./stats_others.csv')
+        stats_path = self.paths.results_dir / 'stats_others.csv'
 
         for trial in tqdm(range(1, num_trials + 1), desc=f'{self.method!r}'):
             cluster_path = self.output_cluster_base / f'{self.name}_{self.method}_{trial}_clusters.txt'
 
             if cluster_path.exists() and not overwrite:  # clustering already exists
-                print(f'Existing clustering found {self.method!r} {self.name!r} {trial}')
+                # print(f'Existing clustering found {self.method!r} {self.name!r} {trial}')
                 continue
 
             tic = time.time()
@@ -83,13 +82,14 @@ class BaseClustering:
             mu = self.input_graph.graph['mu']
             avg_k = self.input_graph.graph['avg_k']
             max_k = self.input_graph.graph['max_k']
+            timestamp = datetime.now().strftime('%c')
 
             clustering_stats = self.get_clustering_stats(generated_clustering=generate_clustering,
                                                          running_time=time_taken, mu=mu, avg_k=avg_k, max_k=max_k,
-                                                         timestamp=datetime.now(), trial=trial,
+                                                         timestamp=timestamp, trial=trial,
                                                          output_cluster_path=cluster_path)
 
-            self.write_stats(stats_dict=clustering_stats, stats_path=stats_filename)
+            self.write_stats(stats_dict=clustering_stats, stats_path=stats_path)
             write_clustering(clustering=generate_clustering, cluster_path=cluster_path)
 
         return
@@ -200,47 +200,54 @@ class CorrelationClustering(BaseClustering):
 
     def run(self, num_trials: int, overwrite: bool, write_stats: bool = True, try_merging: bool = False):
         # running the method num_trials many times
-        stats_filename = self.paths.results_dir / 'stats_CL.csv'
+        stats_path = self.paths.results_dir / 'stats_CL.csv'
 
         if not self.is_continuous:
             taus = [-1]
         else:
-            taus = np.linspace(0, self.tau_max, 5)  # TODO: change to log scale
+            # taus = np.linspace(0, self.tau_max, 5)  # change to log scale
+            taus = np.geomspace(np.finfo(float).eps, self.tau_max, num=5)
+
         clusterings = {}
-        for tau in taus:
+        for tau_ix, tau in enumerate(taus):
             R = self.generate_R_matrix(tau=tau)
 
             if tau not in clusterings:
                 clusterings[tau] = []
+            method_ = f'{self.method}-C' if self.is_continuous else f'{self.method}-D'
+            method = f'{method_}-exact' if self.exact else method_
 
-            for trial in tqdm(range(1, num_trials + 1), desc=f'Correlation clustering {self.method}..', leave=False):
-                method_ = f'{self.method}-C' if self.is_continuous else f'{self.method}-D'
-                method = f'{method_}-exact' if self.exact else method_
+            desc = f'Corr {method} ..'
 
-                cluster_path = self.output_cluster_base / f'{self.name}_{method}_{tau}_{trial}_clusters.txt'
+            for trial in tqdm(range(1, num_trials + 1), desc=desc, leave=False):
+                cluster_path = self.output_cluster_base / f'{self.name}_{method}_{tau_ix}_{trial}_clusters.txt'
 
                 if cluster_path.exists() and not overwrite:  # clustering already exists
-                    print(f'Existing clustering found {method!r} {self.name!r}')
+                    # print(f'Existing clustering found {method!r} {self.name!r}')
                     continue
 
                 tic = time.time()
                 generated_clustering = self._run_method(R=R, try_merging=try_merging)
                 time_taken = time.time() - tic
-                generated_clustering.method_parameters = {'tau': tau, 'tau_max': self.tau_max, 'trial': trial}
+                generated_clustering.method_parameters.update({'tau': tau, 'tau_max': self.tau_max, 'trial': trial})
                 clusterings[tau].append(generated_clustering)
 
                 if write_stats:
                     mu = self.input_graph.graph.get('mu', np.nan)
                     avg_k = self.input_graph.graph.get('avg_k', np.nan)
                     max_k = self.input_graph.graph.get('max_k', np.nan)
+                    before_merge = generated_clustering.method_parameters['before_merge']
+                    timestamp = datetime.now().strftime('%c')
 
                     clustering_stats = self.get_clustering_stats(generated_clustering=generated_clustering,
-                                                                 running_time=time_taken, tau=tau, tau_max=self.tau_max,
+                                                                 running_time=time_taken, tau=tau, tau_ix=tau_ix,
+                                                                 tau_max=self.tau_max,
                                                                  mu=mu, avg_k=avg_k, max_k=max_k,
-                                                                 timestamp=datetime.now(), trial=trial,
+                                                                 timestamp=timestamp, trial=trial,
+                                                                 before_merge=before_merge,
                                                                  output_cluster_path=cluster_path)
                     clustering_stats['method'] = method  # methods with augmented 'D' or 'C"
-                    self.write_stats(stats_dict=clustering_stats, stats_path=stats_filename)
+                    self.write_stats(stats_dict=clustering_stats, stats_path=stats_path)
                     write_clustering(clustering=generated_clustering, cluster_path=cluster_path)
 
         return clusterings
@@ -336,10 +343,13 @@ class CorrelationClustering(BaseClustering):
                             communities[merge_ix].add(u)  # add u to the merged community
 
                 after_merge = len([comm for comm in communities if len(comm) > 0])
-                print(f'\n{self.method}\t {before_merge=}\t {after_merge=}')
+                # print(f'\n{self.method}\t {before_merge=}\t {after_merge=}')
+        else:
+            before_merge = None
 
         communities = [list(comm) for comm in communities if len(comm) > 0]
-        clustering = NodeClustering(graph=self.input_graph, method_name=self.method, communities=communities)
+        clustering = NodeClustering(graph=self.input_graph, method_name=self.method, communities=communities,
+                                    method_parameters={'before_merge': before_merge})
 
         return clustering
 
@@ -512,7 +522,7 @@ if __name__ == '__main__':
     corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=True, method=method,
                                          ground_truth_clustering=ground_truth_clustering)
 
-    clusterings = corr_cluster.run(num_trials=10, overwrite=True, write_stats=False, try_merging=True)
+    clusterings = corr_cluster.run(num_trials=10, overwrite=True, write_stats=True, try_merging=True)
 
     #
     # methods = ['GW', 'RW', 'Diff']

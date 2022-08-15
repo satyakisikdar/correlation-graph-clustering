@@ -171,7 +171,7 @@ class CorrelationClustering(BaseClustering):
             raise Exception()
 
         self.tau_max = 1 / abs(
-            scipy.sparse.linalg.eigs(self.H, k=1, return_eigenvectors=False)[0][0])  # to make sure it's non-negative
+            scipy.sparse.linalg.eigs(self.H, k=1, return_eigenvectors=False)[0])  # to make sure it's non-negative
 
         ## TODO: alternate tau_max: tau_diff = 1 / e: e is the first non-zero sorted eigenvalue of H
         return

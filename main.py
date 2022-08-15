@@ -1,5 +1,5 @@
 """Main driver"""
-
+import random
 import subprocess
 import sys
 from pathlib import Path
@@ -71,17 +71,6 @@ def LFR_runner():
     return
 
 
-def corr_cluster_runner(mu, avg_k, trial, method, continuous, exact):
-    paths = Paths(basedir='./')
-    lfr = LFRGraph(mu=mu, paths=paths, n=1000, avg_k=avg_k)
-    input_g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=trial)
-    clustering_method = CorrelationClustering(input_graph=input_g,
-                                              ground_truth_clustering=ground_truth_clustering,
-                                              method=method, continuous=continuous, paths=paths, exact=exact)
-    clustering_method.run(num_trials=5, overwrite=False)
-    return
-
-
 def other_methods_runner(mu, avg_k, trial, method):
     paths = Paths(basedir='./')
     lfr = LFRGraph(mu=mu, paths=paths, n=1000, avg_k=avg_k)
@@ -89,7 +78,7 @@ def other_methods_runner(mu, avg_k, trial, method):
     other_clustering = OtherClustering(paths=paths, input_graph=input_g,
                                        ground_truth_clustering=ground_truth_clustering,
                                        method=method)
-    other_clustering.run(num_trials=10, overwrite=False)
+    other_clustering.run(num_trials=5, overwrite=False)
     return
 
 
@@ -101,8 +90,7 @@ def other_methods():
     for mu in mus:
         for avg_k in (15, 20, 25):
             for trial in range(1, 21):
-                methods = ['louvain', 'greedy_modularity', 'label_propagation', 'infomap', 'leiden', 'eigenvector'][
-                          : -1]
+                methods = ['louvain', 'greedy_modularity', 'label_propagation', 'infomap', 'leiden', 'eigenvector']
                 for method in methods:
                     args.append((mu, avg_k, trial, method, exact))
 
@@ -110,11 +98,21 @@ def other_methods():
     return
 
 
+def corr_cluster_runner(mu, avg_k, trial, method, continuous, exact):
+    paths = Paths(basedir='./')
+    lfr = LFRGraph(mu=mu, paths=paths, n=1000, avg_k=avg_k)
+    input_g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=trial)
+    clustering_method = CorrelationClustering(input_graph=input_g,
+                                              ground_truth_clustering=ground_truth_clustering,
+                                              method=method, continuous=continuous, paths=paths, exact=exact)
+    clustering_method.run(num_trials=5, overwrite=False, try_merging=True)
+    return
+
+
 def corr_cluster():
-    num_workers = 12
+    num_workers = 15
     args = []
     mus = np.linspace(0, 1, 21)
-    exact = True
 
     for mu in mus:
         for avg_k in (15, 20, 25):
@@ -122,13 +120,14 @@ def corr_cluster():
                 methods = 'GW', 'RW', 'Diff'
                 for method in methods:
                     for continuous in [True, False]:
-                        if method == 'Diff' and not continuous:
-                            continue
-                        if exact and not continuous:  # exact calculation only needed for continuous methods
-                            continue
-                        args.append((mu, avg_k, trial, method, continuous, exact))
-                        break
+                        for exact in [True, False]:
+                            if method == 'Diff' and not continuous:
+                                continue
+                            if exact and not continuous:  # exact calculation only needed for continuous methods
+                                continue
+                            args.append((mu, avg_k, trial, method, continuous, exact))
 
+    random.shuffle(args)
     parallel_async(func=corr_cluster_runner, args=args, num_workers=num_workers)
     return
 

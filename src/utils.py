@@ -75,11 +75,11 @@ def plot_network_clusters(
         ax: plt.Axes = None,
         title: str = None,
         position: dict = None,
-        figsize: tuple = (8, 8),
-        node_size: int = 100,
+        figsize: tuple = (12, 12),
+        node_size: int = 125,
         plot_overlaps: bool = False,
         plot_labels: bool = False,
-        cmap: object = None,
+        cmap: object = 'tab20',
         top_k: int = None,
         min_size: int = None,
 ) -> object:
@@ -117,14 +117,12 @@ def plot_network_clusters(
 
     # ax.axis('off')
 
-    # if title is None:
-    #     modularity = partition.newman_girvan_modularity().score
-    #     title = f'{graph.name!r} \t |V| = {graph.order():,} \t |E| = {graph.size():,}\n' \
-    #             f'method = {partition.method_name!r} \t clusters = {len(partition.communities):,} \t modularity = {modularity:.4g}'
-
-    if title is not None:
+    if title is None:
+        modularity = partition.newman_girvan_modularity().score
+        title = f'{graph.name!r} \t |V| = {graph.order():,} \t |E| = {graph.size():,}\n' \
+                f'method = {partition.method_name!r} \t clusters = {len(partition.communities):,} \t modularity = {modularity:.4g}'
         title = title.replace('\t', '    ')
-        ax.set_title(title, fontsize=40)
+        ax.set_title(title, fontsize=20)
 
     partition = __filter(partition.communities, top_k, min_size)
     graph = convert_graph_formats(graph, nx.Graph)

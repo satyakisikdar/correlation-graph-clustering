@@ -78,22 +78,27 @@ def other_methods_runner(mu, avg_k, trial, method):
     other_clustering = OtherClustering(paths=paths, input_graph=input_g,
                                        ground_truth_clustering=ground_truth_clustering,
                                        method=method)
-    other_clustering.run(num_trials=5, overwrite=False)
+    try:
+        other_clustering.run(num_trials=5, overwrite=False)
+    except Exception as e:
+        print(e)
     return
 
 
 def other_methods():
     num_workers = 5
+    methods = ['louvain', 'greedy_modularity', 'label_propagation', 'leiden', 'eigenvector', 'infomap']
     args = []
     exact = True
     mus = np.linspace(0, 1, 21)
     for mu in mus:
         for avg_k in (15, 20, 25):
             for trial in range(1, 21):
-                methods = ['louvain', 'greedy_modularity', 'label_propagation', 'infomap', 'leiden', 'eigenvector']
-                for method in methods:
-                    args.append((mu, avg_k, trial, method, exact))
 
+                for method in methods:
+                    args.append((mu, avg_k, trial, method))
+
+    random.shuffle(args)
     parallel_async(func=other_methods_runner, args=args, num_workers=num_workers)
     return
 

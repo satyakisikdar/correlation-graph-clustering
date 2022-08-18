@@ -77,8 +77,8 @@ def plot_network_clusters(
         ax: plt.Axes = None,
         title: str = None,
         position: dict = None,
-        figsize: tuple = (12, 12),
-        node_size: int = 125,
+        figsize: tuple = (5, 5),
+        node_size: int = 150,
         plot_overlaps: bool = False,
         plot_labels: bool = False,
         cmap: object = 'tab20',
@@ -121,10 +121,22 @@ def plot_network_clusters(
 
     if title is None:
         modularity = partition.newman_girvan_modularity().score
+        if 'method' in partition.method_parameters:
+            method = partition.method_parameters['method']
+        else:
+            method = partition.method_name
         title = f'{graph.name!r} \t |V| = {graph.order():,} \t |E| = {graph.size():,}\n' \
-                f'method = {partition.method_name!r} \t clusters = {len(partition.communities):,} \t modularity = {modularity:.4g}'
+                f'method = {method!r} \t clusters = {len(partition.communities):,} \t modularity = {modularity:.4g}'
+
+        if 'leakage_diff' in partition.method_parameters:
+            leakage_diff = partition.method_parameters['leakage_diff']
+            full_leakage = partition.method_parameters['full_leakage_score']
+            leakage_score = partition.method_parameters['leakage_score']
+
+            title += f'\nLeakage:\tfull: {full_leakage:.4g}\tscore: {leakage_score:.4g}\tdiff:{leakage_diff:.4g}'
+
         title = title.replace('\t', '    ')
-        ax.set_title(title, fontsize=20)
+        ax.set_title(title, fontsize=10)
 
     partition = __filter(partition.communities, top_k, min_size)
     graph = convert_graph_formats(graph, nx.Graph)

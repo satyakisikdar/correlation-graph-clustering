@@ -1,6 +1,7 @@
 """Container for clustering"""
 import abc
 import csv
+import itertools
 import random
 import subprocess
 import sys
@@ -45,7 +46,7 @@ class BaseClustering:
 
         if isinstance(self, CorrelationClustering):
             columns = ['timestamp', 'name', 'mu', 'avg_k', 'max_k',
-                       'method', 'tau_max', 'tau_ix', 'tau', 'orig_clusters', 'trial', 'running_time',
+                       'method', 'tau_max', 'tau_diff', 'tau_ix', 'tau', 'orig_clusters', 'trial', 'running_time',
                        'num_clusters', 'before_merge', 'modularity', 'NMI', 'AMI', 'EC', 'output_cluster_path']
             round_cols += ['tau_max']
         else:
@@ -90,7 +91,7 @@ class BaseClustering:
                                                          output_cluster_path=cluster_path)
 
             self.write_stats(stats_dict=clustering_stats, stats_path=stats_path)
-            write_clustering(clustering=generate_clustering, cluster_path=cluster_path)
+            # write_clustering(clustering=generate_clustering, cluster_path=cluster_path)
 
         return
 
@@ -116,7 +117,7 @@ class CorrelationClustering(BaseClustering):
     _METHODS = ['GW', 'RW', 'Diff']  # CL = Correlation leakage, # GW = GraphWalk, RW = RandomWalk, Diff = Diffusion
 
     def __init__(self, method: str, continuous: bool, paths: Paths, input_graph: nx.Graph,
-                 ground_truth_clustering: NodeClustering, exact: bool = False):
+                 ground_truth_clustering: NodeClustering, exact: bool = True):
 
         super().__init__(paths=paths, input_graph=input_graph, ground_truth_clustering=ground_truth_clustering,
                          method=method)
@@ -127,7 +128,7 @@ class CorrelationClustering(BaseClustering):
         self.is_continuous = continuous  # true if continuous
         self.exact = exact  # exact computation of R
         self._init_matrices()
-
+        self.full_leakage_score = None
         return
 
     def _init_matrices(self):
@@ -173,7 +174,16 @@ class CorrelationClustering(BaseClustering):
         self.tau_max = 1 / abs(
             scipy.sparse.linalg.eigs(self.H, k=1, return_eigenvectors=False)[0])  # to make sure it's non-negative
 
-        ## TODO: alternate tau_max: tau_diff = 1 / e: e is the first non-zero sorted eigenvalue of H
+        # tau_diff is inverse of the second smallest non-zero eigenvalue of H
+        sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H.toarray(), right=False)))
+        second_smallest_eig = None
+        for eig in sorted_eigenvals:
+            if not np.isclose(eig, 0):
+                second_smallest_eig = eig
+                break
+        assert second_smallest_eig is not None, f'second smallest eigenvalue is None!!'
+        self.tau_diff = 1 / second_smallest_eig
+
         return
 
     def generate_R_matrix(self, tau: float = None):
@@ -196,6 +206,9 @@ class CorrelationClustering(BaseClustering):
 
         else:  # discrete method
             R = -H @ H_t + H_prime @ H_prime_t
+
+        self.full_leakage_score = np.sum(R)  # every node is in its own community
+        # assert not np.isclose(self.full_leakage_score, 0), f'Leakage score is 0 for {self.method} {tau=:.4g}'
         return R
 
     def run(self, num_trials: int, overwrite: bool, write_stats: bool = True, try_merging: bool = False):
@@ -206,7 +219,9 @@ class CorrelationClustering(BaseClustering):
             taus = [-1]
         else:
             # taus = np.linspace(0, self.tau_max, 5)  # change to log scale
-            taus = np.geomspace(np.finfo(float).eps, self.tau_max, num=5)
+            taus_1 = np.geomspace(np.finfo(float).eps, self.tau_max, num=5)
+            taus_2 = np.geomspace(self.tau_max, self.tau_diff, num=5)[1:]  # prevent tau_max from getting double counted
+            taus = np.concatenate([taus_1, taus_2])
 
         clusterings = {}
         for tau_ix, tau in enumerate(taus):
@@ -229,7 +244,8 @@ class CorrelationClustering(BaseClustering):
                 tic = time.time()
                 generated_clustering = self._run_method(R=R, try_merging=try_merging)
                 time_taken = time.time() - tic
-                generated_clustering.method_parameters.update({'tau': tau, 'tau_max': self.tau_max, 'trial': trial})
+                generated_clustering.method_parameters.update({'method': method, 'tau': tau, 'tau_max': self.tau_max,
+                                                               'tau_diff': self.tau_diff, 'trial': trial})
                 clusterings[tau].append(generated_clustering)
 
                 if write_stats:
@@ -241,7 +257,7 @@ class CorrelationClustering(BaseClustering):
 
                     clustering_stats = self.get_clustering_stats(generated_clustering=generated_clustering,
                                                                  running_time=time_taken, tau=tau, tau_ix=tau_ix,
-                                                                 tau_max=self.tau_max,
+                                                                 tau_max=self.tau_max, tau_diff=self.tau_diff,
                                                                  mu=mu, avg_k=avg_k, max_k=max_k,
                                                                  timestamp=timestamp, trial=trial,
                                                                  before_merge=before_merge,
@@ -252,10 +268,90 @@ class CorrelationClustering(BaseClustering):
 
         return clusterings
 
-    def _run_method(self, R, try_merging: bool = False):
+    def _run_method(self, R, try_merging=False):
+        # store clusters as list of sets of nodes, flatten them out at the end of each iteration
+        R = R * -1  # to maximize
+
+        communities = [[{u}] for u in self.input_graph.nodes()]
+        super_nodes = [{u} for u in self.input_graph.nodes()]  # list of flattened supernodes
+        mapping = {u: i for i, u in enumerate(sorted(self.input_graph.nodes()))}
+
+        changed = True
+        while changed:
+            changed = False
+            random.shuffle(super_nodes)
+            for s_i in super_nodes:
+                # figure out the current community where s_i is in
+                s_i_comm_ix = None
+                for i, comm in enumerate(communities):
+                    if s_i in comm:
+                        s_i_comm_ix = i
+                        break
+                assert s_i_comm_ix is not None, f's_i index is None'
+
+                d_i = communities[s_i_comm_ix]
+                # loss of s_i leaving its own community
+                loss = 0
+                for s_j in d_i:
+                    if s_i == s_j:
+                        continue
+                    for i in s_i:
+                        for j in s_j:
+                            loss -= 2 * R[mapping[i], mapping[j]]
+
+                # check other communities for s_i to merge with
+                max_gain = 0
+                best_community_ix = None
+                for ix_2, d_j in enumerate(communities):
+                    if s_i_comm_ix == ix_2:  # skip over s_i's own community
+                        continue
+                    gain = 0
+                    for i in s_i:
+                        for s_j in d_j:
+                            for j in s_j:
+                                gain += 2 * R[mapping[i], mapping[j]]
+
+                    if gain > max_gain:
+                        max_gain = gain
+                        best_community_ix = ix_2
+
+                change_in_quality = max_gain + loss
+                if best_community_ix is not None and change_in_quality > 0:
+                    changed = True
+                    communities[best_community_ix].append(s_i)  # add s_i to its new community
+
+                    # move s_i from its previous community to its new community
+                    communities[s_i_comm_ix].remove(s_i)
+                    if len(communities[s_i_comm_ix]) == 0:  # the community is empty
+                        del communities[s_i_comm_ix]
+
+            # flatten the communities at the end
+            super_nodes = [set.union(*s_i) for s_i in communities]  # note the lack of inner list
+            communities = [[set.union(*s_i)] for s_i in
+                           communities]  # notice the outer list inside: communities are list of sets
+
+        communities = [list(comm[0]) for comm in communities if len(comm) > 0]
+        # calculate leakage score based on the clustering found
+        leakage_score = 0
+        for comm in communities:
+            for i, j in itertools.combinations_with_replacement(comm, 2):  # to account for diagonals
+                leakage_score += 2 * R[mapping[i], mapping[j]]
+
+        leakage_score -= np.trace(R)  # to prevent diagonals from getting counted twice
+        leakage_diff = round(self.full_leakage_score - leakage_score, 5)
+
+        clustering = NodeClustering(graph=self.input_graph, method_name=self.method, communities=communities,
+                                    method_parameters={'full_leakage_score': self.full_leakage_score,
+                                                       'leakage_score': leakage_score, 'leakage_diff': leakage_diff})
+
+        return clustering
+
+    def _run_method_old(self, R, try_merging: bool = False):
         """
         R is the quality matrix
         """
+        # TODO: pick the clustering with the max R score
+
         R = R * -1  # to maximize
 
         n = R.shape[0]
@@ -510,33 +606,22 @@ class LFRGraph:
 if __name__ == '__main__':
     paths = Paths(basedir='../')
     avg_k = 20
-    mu = 0.4
-    # lfr = LFRGraph(paths=paths, n=1000, mu=mu, avg_k=avg_k)
+    mu = 0.1
+    # lfr = LFRGraph(paths=paths, n=100, mu=mu, avg_k=avg_k)
     # g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=1)
-    g = nx.ring_of_cliques(51, clique_size=4)
-    g.name = 'clique-ring'
+    sizes = [20, 20, 20]
+    probs = [[0.25, 0.02, 0.02], [0.02, 0.35, 0.02], [0.02, 0.02, 0.40]]
+
+    # g = nx.stochastic_block_model(sizes, probs, seed=1)
+    # g = nx.ring_of_cliques(51, clique_size=4)
+    g = nx.barbell_graph(4, 5);
+    g.name = 'barbell'
     ground_truth_clustering = None
 
-    method = 'RW'
+    method = 'Diff'
 
     corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=True, method=method,
-                                         ground_truth_clustering=ground_truth_clustering)
+                                         ground_truth_clustering=ground_truth_clustering, exact=True)
 
-    clusterings = corr_cluster.run(num_trials=10, overwrite=True, write_stats=True, try_merging=True)
-
-    #
-    # methods = ['GW', 'RW', 'Diff']
-    # # methods = ['RW']
-    # for method in methods:
-    #     is_continuous = True
-    #     corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=is_continuous, method=method,
-    #                                          ground_truth_clustering=ground_truth_clustering)
-    #
-    #     tau_max = corr_cluster.tau_max
-    #     for tau in np.linspace(0, tau_max, 5):
-    #         approx_R = corr_cluster.generate_R_matrix(compute_exact=False, tau=tau)
-    #         exact_R = corr_cluster.generate_R_matrix(compute_exact=True, tau=tau)
-    #
-    #         print(method, is_continuous, tau.round(4), np.abs(approx_R - exact_R).mean().round(4),
-    #               np.diag(np.abs(approx_R - exact_R)).mean().round(4), )
-    #     print()
+    clusterings = corr_cluster.run(num_trials=1, write_stats=False, overwrite=True)
+    clusterings

@@ -224,10 +224,13 @@ class CorrelationClustering(BaseClustering):
         mapping = {u: i for i, u in enumerate(sorted(self.input_graph.nodes))}
         n, m = self.input_graph.order(), self.input_graph.size()
 
-        self.A = nx.to_scipy_sparse_array(self.input_graph, dtype='d', weight=1,  # unweighted graphs only
-                                          nodelist=sorted(self.input_graph.nodes()))
+        # self.A = nx.to_scipy_sparse_array(self.input_graph, dtype='d', weight=1,  # unweighted graphs only
+        #                                   nodelist=sorted(self.input_graph.nodes()))
+        self.A = nx.to_numpy_array(self.input_graph, dtype='d', weight=1, nodelist=sorted(self.input_graph.nodes))
+
         self.d = self.A @ np.ones((n, 1))  # n x 1 degree vector
-        self.D = scipy.sparse.diags(self.d.flatten())
+        self.D = np.diag(self.d.flatten())
+        # self.D = scipy.sparse.diags(self.d.flatten())
 
         self.A_prime = (self.d @ np.transpose(self.d)) / (2 * m)  # null model
 
@@ -249,14 +252,17 @@ class CorrelationClustering(BaseClustering):
         elif self.method == 'RW':
             if self.is_continuous:
                 n = self.input_graph.order()
-                I = scipy.sparse.eye(n, n)
-                D_inv = scipy.sparse.diags((1 / self.d).flatten())
+                # I = scipy.sparse.eye(n, n)
+                I = np.eye(n, n)
+                # D_inv = scipy.sparse.diags((1 / self.d).flatten())
+                D_inv = np.diag((1 / self.d).flatten())
 
                 self.H = I - (self.A @ D_inv)
                 self.H_prime = I - (self.A_prime @ D_inv)  # I_prime and D_inv_prime should be the same
 
             else:
-                D_inv = scipy.sparse.diags((1 / self.d).flatten())
+                # D_inv = scipy.sparse.diags((1 / self.d).flatten())
+                D_inv = np.diag((1 / self.d).flatten())
                 self.H = self.A @ D_inv
                 self.H_prime = self.A_prime @ D_inv
         else:
@@ -266,7 +272,8 @@ class CorrelationClustering(BaseClustering):
             scipy.sparse.linalg.eigs(self.H, k=1, return_eigenvectors=False)[0])  # to make sure it's non-negative
 
         # tau_diff is inverse of the second smallest non-zero eigenvalue of H
-        sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H.toarray(), right=False)))
+        # sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H.toarray(), right=False)))
+        sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H, right=False)))
         second_smallest_eig = None
         for eig in sorted_eigenvals:
             if not np.isclose(eig, 0):
@@ -283,7 +290,8 @@ class CorrelationClustering(BaseClustering):
 
         if self.is_continuous:
             if self.exact:
-                U = scipy.sparse.linalg.expm(-tau * H)
+                # U = scipy.sparse.linalg.expm(-tau * H)
+                U = scipy.linalg.expm(-tau * H)
                 U = U @ U.transpose()
                 R = H @ U + U @ H_t - H_prime @ U - U @ H_prime_t
 
@@ -792,7 +800,7 @@ def corr_leakage_partitions(G, R, weight="weight", threshold=0.0000001):
     Detection Algorithm.
     """
 
-    partition = [{u} for u in G.nodes()]
+    partition = [{u} for u in sorted(G.nodes)]  # should also be in sorted order
 
     graph = G.__class__()
     graph.add_nodes_from(G)
@@ -813,6 +821,8 @@ def corr_leakage_partitions(G, R, weight="weight", threshold=0.0000001):
         R = shrink_R_matrix(comm=inner_partition, R=R)  # shrink the R matrix based on the partition
         graph = _gen_graph(graph, inner_partition)
         partition, inner_partition, improvement = _one_level(G=graph, partition=partition, R=R)
+
+    return
 
 
 def _neighbor_weights(nbrs, node2com):
@@ -995,15 +1005,15 @@ if __name__ == '__main__':
     paths = Paths(basedir='../')
     avg_k = 20
     mu = 0.1
-    # lfr = LFRGraph(paths=paths, n=100, mu=mu, avg_k=avg_k)
-    # g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=1)
+    lfr = LFRGraph(paths=paths, n=100, mu=mu, avg_k=avg_k)
+    g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=1)
     # sizes = [20, 20, 20]
     # probs = [[0.25, 0.02, 0.02], [0.02, 0.35, 0.02], [0.02, 0.02, 0.40]]
 
     # g = nx.stochastic_block_model(sizes, probs, seed=1)
     # g = nx.ring_of_cliques(51, clique_size=4)
-    g, g.name = nx.barbell_graph(4, 5), 'barbell'
-    ground_truth_clustering = NodeClustering(communities=[[0, 1, 2, 3], [4, 5, 6, 7, 8], [9, 10, 11, 12]], graph=g)
+    # g, g.name = nx.barbell_graph(4, 5), 'barbell'
+    # ground_truth_clustering = NodeClustering(communities=[[0, 1, 2, 3], [4, 5, 6, 7, 8], [9, 10, 11, 12]], graph=g)
 
     louvain_comms = nx.community.louvain_communities(g)
 

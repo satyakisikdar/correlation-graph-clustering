@@ -10,6 +10,9 @@ import numpy as np
 from src.clustering import LFRGraph, CorrelationClustering, OtherClustering
 from src.utils import Paths, remove_files, parallel_async
 
+# import mkl
+# mkl.set_num_threads(2)
+
 sys.path.extend(['./', '../'])
 
 
@@ -79,22 +82,21 @@ def other_methods_runner(mu, avg_k, trial, method):
                                        ground_truth_clustering=ground_truth_clustering,
                                        method=method)
     try:
-        other_clustering.run(num_trials=5, overwrite=False)
+        other_clustering.run(num_trials=10, overwrite=False)
     except Exception as e:
-        print(e)
+        print(method, e)
     return
 
 
 def other_methods():
-    num_workers = 5
-    methods = ['louvain', 'greedy_modularity', 'label_propagation', 'leiden', 'eigenvector', 'infomap']
+    num_workers = 7
+    methods = ['louvain', 'greedy_modularity', 'label_propagation', 'leiden', 'infomap']
     args = []
-    exact = True
+
     mus = np.linspace(0, 1, 21)
     for mu in mus:
         for avg_k in (15, 20, 25):
             for trial in range(1, 21):
-
                 for method in methods:
                     args.append((mu, avg_k, trial, method))
 
@@ -111,7 +113,7 @@ def corr_cluster_runner(mu, avg_k, trial, method, continuous, exact):
     clustering_method = CorrelationClustering(input_graph=input_g,
                                               ground_truth_clustering=ground_truth_clustering,
                                               method=method, continuous=continuous, paths=paths, exact=exact)
-    clustering_method.run(num_trials=10, overwrite=False, try_merging=True)
+    clustering_method.run(num_trials=10, overwrite=False)
     return
 
 
@@ -137,12 +139,12 @@ def corr_cluster():
 
 
 if __name__ == '__main__':
-    # print('hello')
-    # paths = Paths()
-    # print(paths.data_dir)
-    corr_cluster()
-    # other_methods()
+    print('hello')
+    # corr_cluster()
+    other_methods()
 
+    # corr_cluster_runner(mu=0.1, avg_k=15, trial=1, method='GW', continuous=True, exact=True)
+    #
     # main()
     # for avg_k in [15, 20, 25]:
     #     for mu in np.linspace(0, 1, 21):

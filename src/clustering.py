@@ -11,6 +11,8 @@ from datetime import datetime
 from typing import Tuple, Dict
 
 import cdlib
+import igraph as ig
+import infomap
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
@@ -26,38 +28,27 @@ sys.path.extend(['./', '../'])
 from src.utils import Paths, plot_network_clusters, write_clustering, remove_files, clusim_ec_score
 
 
-def infomap(g_original: object, flags: str = "") -> NodeClustering:
+def infomap_runner(g_original: object, flags: str = "") -> NodeClustering:
+    im = infomap.Infomap(silent=True, two_level=False)
+    mapping = im.add_networkx_graph(g_original)
+    im.run()
+    coms = {}
+
+    for node in im.nodes:
+        com_label = node.module_id
+        if com_label not in coms:
+            coms[com_label] = []
+        coms[com_label].append(mapping[node.node_id])
+
+    return NodeClustering(
+        list(coms.values()), g_original, "Infomap", method_parameters={"flags": flags, 'codelength': im.getCodelength()}
+    )
+
+
+def _infomap(g_original: object, flags: str = "") -> NodeClustering:
     """
     Infomap is based on ideas of information theory.
     The algorithm uses the probability flow of random walks on a network as a proxy for information flows in the real system and it decomposes the network into modules by compressing a description of the probability flow.
-
-
-    **Supported Graph Types**
-
-    ========== ======== ========
-    Undirected Directed Weighted
-    ========== ======== ========
-    Yes        Yes      Yes
-    ========== ======== ========
-
-    :param g_original: a networkx/igraph object
-    :param flags: str flags for Infomap
-    :return: NodeClustering object
-
-    :Example:
-
-    >>> from cdlib import algorithms
-    >>> import networkx as nx
-    >>> G = nx.karate_club_graph()
-    >>> coms = algorithms.infomap(G)
-
-    :References:
-
-    Rosvall M, Bergstrom CT (2008) `Maps of random walks on complex networks reveal community structure. <https://www.pnas.org/content/105/4/1118/>`_ Proc Natl Acad SciUSA 105(4):1118–1123
-
-    .. note:: Reference implementation: https://pypi.org/project/infomap/
-
-    .. note:: Infomap Python API documentation: https://mapequation.github.io/infomap/python/
     """
     global imp, pipes
     if imp is None:
@@ -110,6 +101,25 @@ def infomap(g_original: object, flags: str = "") -> NodeClustering:
     )
 
 
+def leiden(
+        g_original: object, initial_membership: list = None, weights: list = None
+) -> NodeClustering:
+    """
+    Modified implementation that uses igraph
+    """
+    ig_g = ig.Graph.from_networkx(g_original)
+    leiden_comm = ig_g.community_leiden(objective_function='modularity')
+
+    comms = {}
+    for i, com_label in enumerate(leiden_comm.membership):
+        if com_label not in comms:
+            comms[com_label] = []
+        comms[com_label].append(ig_g.vs[i]['_nx_name'])
+
+    clustering = NodeClustering(communities=list(comms.values()), graph=g_original, method_name='Leiden_Q')
+    return clustering
+
+
 class BaseClustering:
     def __init__(self, paths: Paths, input_graph: nx.Graph,
                  ground_truth_clustering: NodeClustering, method: str):
@@ -133,12 +143,12 @@ class BaseClustering:
         if isinstance(self, CorrelationClustering):
             columns = ['timestamp', 'name', 'mu', 'avg_k', 'max_k',
                        'method', 'tau_max', 'tau_diff', 'tau_ix', 'tau', 'orig_clusters', 'running_time',
-                       'leakage_score',
+                       'metric', 'score',
                        'num_clusters', 'modularity', 'NMI', 'AMI', 'EC', 'output_cluster_path']
             round_cols += ['tau_max']
         else:
             columns = ['timestamp', 'name', 'mu', 'avg_k', 'max_k',
-                       'method', 'orig_clusters',
+                       'method', 'orig_clusters', 'metric', 'score',
                        'running_time', 'num_clusters', 'modularity', 'NMI', 'AMI', 'EC', 'output_cluster_path']
 
         for col in round_cols:
@@ -155,34 +165,55 @@ class BaseClustering:
     def run(self, num_trials: int, overwrite: bool):
         # running the method num_trials many times
         stats_path = self.paths.results_dir / 'stats_others.csv'
-
-        metric = 'modularity' if method in ['louvain', 'leiden'] else 'nmi'
+        if self.method in ['louvain', 'leiden']:
+            metric = 'modularity'
+        elif self.method == 'infomap':
+            metric = 'codelength'
+        else:
+            metric = 'nmi'
+        cluster_path = self.output_cluster_base / f'{self.name}_{self.method}_best_clusters.txt'
+        best_clustering = None  # store the best clustering for each trial
+        best_score = -1
+        best_clustering_stats = None
 
         for trial in tqdm(range(1, num_trials + 1), desc=f'{self.method!r}'):
-            cluster_path = self.output_cluster_base / f'{self.name}_{self.method}_best_clusters.txt'
-
             if cluster_path.exists() and not overwrite:  # clustering already exists
                 # print(f'Existing clustering found {self.method!r} {self.name!r} {trial}')
                 continue
 
             tic = time.time()
-            generate_clustering = self._run_method()
+            generated_clustering = self._run_method()
             time_taken = time.time() - tic
 
-            mu = self.input_graph.graph['mu']
-            avg_k = self.input_graph.graph['avg_k']
-            max_k = self.input_graph.graph['max_k']
+            if metric == 'modularity':
+                score = generated_clustering.newman_girvan_modularity().score
+            elif metric == 'codelength':
+                score = generated_clustering.method_parameters[metric]
+            else:
+                score = normalized_mutual_information(self.ground_truth_clustering, generated_clustering).score
+
+            mu = self.input_graph.graph.get('mu')
+            avg_k = self.input_graph.graph.get('avg_k')
+            max_k = self.input_graph.graph.get('max_k')
             timestamp = datetime.now().strftime('%c')
 
-            clustering_stats = self.get_clustering_stats(generated_clustering=generate_clustering,
+            clustering_stats = self.get_clustering_stats(generated_clustering=generated_clustering,
                                                          running_time=time_taken, mu=mu, avg_k=avg_k, max_k=max_k,
-                                                         timestamp=timestamp,
+                                                         timestamp=timestamp, score=score, metric=metric,
                                                          output_cluster_path=cluster_path)
 
-            self.write_stats(stats_dict=clustering_stats, stats_path=stats_path)
-            # write_clustering(clustering=generate_clustering, cluster_path=cluster_path)
+            if score > best_score:
+                best_score = score
+                best_clustering = generated_clustering
+                best_clustering_stats = clustering_stats
 
-        return
+            # self.write_stats(stats_dict=clustering_stats, stats_path=stats_path)
+        # only write the best clusterings
+        if best_clustering is not None:
+            write_clustering(clustering=best_clustering, cluster_path=cluster_path)
+            self.write_stats(stats_dict=best_clustering_stats, stats_path=stats_path)
+
+        return best_clustering
 
     def get_clustering_stats(self, generated_clustering: NodeClustering, **params) -> Dict:
         modularity = generated_clustering.newman_girvan_modularity().score
@@ -221,6 +252,8 @@ class CorrelationClustering(BaseClustering):
         return
 
     def _init_matrices(self):
+        # numpy is a lot faster than scipy sparse
+
         mapping = {u: i for i, u in enumerate(sorted(self.input_graph.nodes))}
         n, m = self.input_graph.order(), self.input_graph.size()
 
@@ -381,6 +414,7 @@ class CorrelationClustering(BaseClustering):
                                                              tau_max=self.tau_max, tau_diff=self.tau_diff,
                                                              mu=mu, avg_k=avg_k, max_k=max_k,
                                                              timestamp=timestamp, leakage_score=leakage_score,
+                                                             metric='leakage_score', score=leakage_score,
                                                              output_cluster_path=cluster_path)
                 clustering_stats['method'] = method  # methods with augmented 'D' or 'C"
                 self.write_stats(stats_dict=clustering_stats, stats_path=stats_path)
@@ -491,195 +525,10 @@ class CorrelationClustering(BaseClustering):
 
         return clustering
 
-    def _run_method_old_old(self, R, try_merging=False):
-        # store clusters as list of sets of nodes, flatten them out at the end of each iteration
-        R = R * -1  # to maximize
-
-        communities = [[{u}] for u in self.input_graph.nodes()]
-        super_nodes = [{u} for u in self.input_graph.nodes()]  # list of flattened supernodes
-        supernode2comms = {u: i for i, u in
-                           enumerate(self.input_graph.nodes())}  # mapping between super nodes and their indices
-        mapping = {u: i for i, u in enumerate(sorted(self.input_graph.nodes()))}
-
-        changed = True
-        while changed:
-            changed = False
-            random.shuffle(super_nodes)
-            for s_i in super_nodes:
-                # figure out the current community where s_i is in
-                s_i_comm_ix = None
-                for i, comm in enumerate(communities):
-                    if s_i in comm:
-                        s_i_comm_ix = i
-                        break
-                assert s_i_comm_ix is not None, f's_i index is None'
-
-                d_i = communities[s_i_comm_ix]
-                # loss of s_i leaving its own community
-                loss = 0
-                for s_j in d_i:
-                    if s_i == s_j:
-                        continue
-                    for i in s_i:
-                        for j in s_j:
-                            loss -= 2 * R[mapping[i], mapping[j]]
-
-                # check other communities for s_i to merge with
-                max_gain = 0
-                best_community_ix = None
-                # find neighboring super nodes of s_i
-                # use networkx cuts?
-
-                for ix_2, d_j in enumerate(communities):  # TODO: change this to only look at neighboring super nodes
-                    if s_i_comm_ix == ix_2:  # skip over s_i's own community
-                        continue
-                    gain = 0
-                    for i in s_i:
-                        for s_j in d_j:
-                            for j in s_j:
-                                gain += 2 * R[mapping[i], mapping[j]]
-
-                    if gain > max_gain:
-                        max_gain = gain
-                        best_community_ix = ix_2
-
-                change_in_quality = max_gain + loss
-                if best_community_ix is not None and change_in_quality > 0:
-                    changed = True
-                    communities[best_community_ix].append(s_i)  # add s_i to its new community
-
-                    # move s_i from its previous community to its new community
-                    communities[s_i_comm_ix].remove(s_i)
-                    if len(communities[s_i_comm_ix]) == 0:  # the community is empty
-                        del communities[s_i_comm_ix]
-
-            # flatten the communities at the end
-            super_nodes = [set.union(*s_i) for s_i in communities]  # note the lack of inner list
-            communities = [[set.union(*s_i)] for s_i in
-                           communities]  # notice the outer list inside: communities are list of sets
-
-        communities = [list(comm[0]) for comm in communities if len(comm) > 0]
-        # calculate leakage score based on the clustering found
-        leakage_score = 0
-        for comm in communities:
-            for i, j in itertools.combinations_with_replacement(comm, 2):  # to account for diagonals
-                leakage_score += 2 * R[mapping[i], mapping[j]]
-
-        leakage_score -= np.trace(R)  # to prevent diagonals from getting counted twice
-        leakage_diff = round(self.full_leakage_score - leakage_score, 5)
-
-        clustering = NodeClustering(graph=self.input_graph, method_name=self.method, communities=communities,
-                                    method_parameters={'full_leakage_score': self.full_leakage_score,
-                                                       'leakage_score': leakage_score, 'leakage_diff': leakage_diff})
-
-        return clustering
-
-    def _run_method_old_old_old(self, R, try_merging: bool = False):
-        """
-        R is the quality matrix
-        """
-        # TODO: pick the clustering with the max R score
-
-        R = R * -1  # to maximize
-
-        n = R.shape[0]
-        communities = [{u} for u in self.input_graph.nodes()]  # list of sets
-
-        mapping = {u: i for i, u in enumerate(sorted(self.input_graph.nodes()))}
-
-        iters = 0
-        changed = True
-        nodes = list(self.input_graph.nodes())
-        random.shuffle(nodes)
-
-        while changed:
-            iters += 1
-            changed = False
-
-            for i in nodes:  # try all nodes
-                current_comm_i_idx = [ix for ix, comm in enumerate(communities) if i in comm][0]
-
-                loss_i_from_current_comm = 0  # loss from i leaving its current comm
-                for j in communities[current_comm_i_idx]:  # members of i's community
-                    if i != j:
-                        loss_i_from_current_comm -= R[mapping[i], mapping[j]]
-
-                new_comm_i = None
-                gain_i_to_new_comm = 0
-
-                for comm_ix, old_community in enumerate(communities):  # iterate over all non-emptycommunities
-                    if len(old_community) == 0:  # empty
-                        continue
-                    if comm_ix == current_comm_i_idx:  # skip over i's current community
-                        continue
-                    g = 0
-                    for j in old_community:  # j is from a different community
-                        g += R[mapping[i], mapping[j]]
-
-                    if g > gain_i_to_new_comm:
-                        gain_i_to_new_comm = g
-                        new_comm_i = comm_ix
-
-                quality_change = gain_i_to_new_comm + loss_i_from_current_comm
-
-                if new_comm_i is not None and quality_change > 0:
-                    # remove i from old comm, add it to the new comm
-                    changed = True
-                    communities[new_comm_i].add(i)
-                    communities[current_comm_i_idx].remove(i)
-
-                    if len(communities[current_comm_i_idx]) == 0:
-                        del communities[current_comm_i_idx]
-
-        # try merging clusters if flag is enabled
-        if try_merging:
-            before_merge = len([comm for comm in communities if len(comm) > 0])
-            changed = True
-            random.shuffle(communities)  # shuffle community labels / indices
-
-            while changed:
-                changed = False
-                for i, old_community in enumerate(communities):
-                    if len(old_community) == 0:
-                        continue
-                    merge_ix = None
-                    max_gain = 0
-                    for j, new_community in enumerate(communities):
-                        if j == i:
-                            continue
-
-                        gain = 0
-                        for u in old_community:
-                            for v in new_community:
-                                gain += R[mapping[u], mapping[v]]
-
-                        if gain > max_gain:
-                            max_gain = gain
-                            merge_ix = j
-
-                    if merge_ix is not None:  # all members of community becomes part of new community
-                        assert max_gain > 0
-                        changed = True
-                        # merge community with new community
-                        copy_old_community = set(communities[i])
-                        for u in copy_old_community:
-                            communities[i].remove(u)  # remove u from existing community
-                            communities[merge_ix].add(u)  # add u to the merged community
-
-                after_merge = len([comm for comm in communities if len(comm) > 0])
-                # print(f'\n{self.method}\t {before_merge=}\t {after_merge=}')
-        else:
-            before_merge = None
-
-        communities = [list(comm) for comm in communities if len(comm) > 0]
-        clustering = NodeClustering(graph=self.input_graph, method_name=self.method, communities=communities,
-                                    method_parameters={'before_merge': before_merge})
-
-        return clustering
-
 
 class OtherClustering(BaseClustering):
-    _METHODS = ['louvain', 'greedy_modularity', 'label_propagation', 'infomap', 'leiden', 'eigenvector']
+    _METHODS = ['louvain', 'greedy_modularity', 'label_propagation', 'infomap', 'leiden', 'eigenvector',
+                'sbm_dl', 'sbm_dl_nested']
 
     def __init__(self, paths: Paths, input_graph: nx.Graph, method: str, ground_truth_clustering: NodeClustering):
         super().__init__(paths=paths, input_graph=input_graph, method=method,
@@ -689,8 +538,13 @@ class OtherClustering(BaseClustering):
         return
 
     def _run_method(self, **params) -> NodeClustering:
-        cdlib_alg = getattr(cdlib.algorithms, self.method)
-        clustering = cdlib_alg(self.input_graph)
+        if self.method == 'leiden':
+            clustering = leiden(g_original=self.input_graph)
+        elif self.method == 'infomap':
+            clustering = infomap_runner(g_original=self.input_graph)
+        else:
+            cdlib_alg = getattr(cdlib.algorithms, self.method)
+            clustering = cdlib_alg(self.input_graph)
         return clustering
 
 
@@ -1003,10 +857,19 @@ if __name__ == '__main__':
     # TODO: get description length from infomap object
 
     paths = Paths(basedir='../')
-    avg_k = 20
-    mu = 0.1
-    lfr = LFRGraph(paths=paths, n=100, mu=mu, avg_k=avg_k)
+    avg_k = 15
+    mu = 0.6
+    lfr = LFRGraph(paths=paths, n=1000, mu=mu, avg_k=avg_k)
     g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=1)
+    # g, g.name = nx.barbell_graph(4, 5), 'barbell'
+    # ground_truth_clustering = NodeClustering(communities=[[0, 1, 2, 3], [4, 5, 6, 7, 8], [9, 10, 11, 12]], graph=g)
+
+    method = 'label_propagation'
+    other_clustering = OtherClustering(paths=paths, input_graph=g, ground_truth_clustering=ground_truth_clustering,
+                                       method=method)
+    other_clustering.run(num_trials=1, overwrite=True)
+
+    cdlib.algorithms.greedy_modularity()
     # sizes = [20, 20, 20]
     # probs = [[0.25, 0.02, 0.02], [0.02, 0.35, 0.02], [0.02, 0.02, 0.40]]
 
@@ -1015,12 +878,11 @@ if __name__ == '__main__':
     # g, g.name = nx.barbell_graph(4, 5), 'barbell'
     # ground_truth_clustering = NodeClustering(communities=[[0, 1, 2, 3], [4, 5, 6, 7, 8], [9, 10, 11, 12]], graph=g)
 
-    louvain_comms = nx.community.louvain_communities(g)
+    # louvain_comms = nx.community.louvain_communities(g)
 
-    method = 'GW'
-
-    corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=True, method=method,
-                                         ground_truth_clustering=ground_truth_clustering, exact=True)
-
-    clusterings, best_clusterings = corr_cluster.run(num_trials=5, write_stats=True, overwrite=True)
-    clusterings
+    # method = 'GW'
+    # corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=True, method=method,
+    #                                      ground_truth_clustering=ground_truth_clustering, exact=True)
+    #
+    # clusterings, best_clusterings = corr_cluster.run(num_trials=5, write_stats=True, overwrite=True)
+    # clusterings

@@ -235,10 +235,10 @@ class CorrelationClustering(BaseClustering):
     """
 
     _METHODS = ['GW', 'RW', 'Diff',
-                'CO']  # CL = Correlation leakage, # GW = GraphWalk, RW = RandomWalk, Diff = Diffusion
+                'CO']  # GW=GraphWalk, RW=RandomWalk, Diff=Diffusion, CO=Consensus
 
     def __init__(self, method: str, continuous: bool, paths: Paths, input_graph: nx.Graph,
-                 ground_truth_clustering: NodeClustering, exact: bool = True):
+                 ground_truth_clustering: NodeClustering):
 
         super().__init__(paths=paths, input_graph=input_graph, ground_truth_clustering=ground_truth_clustering,
                          method=method)
@@ -247,7 +247,6 @@ class CorrelationClustering(BaseClustering):
 
         assert isinstance(continuous, bool)
         self.is_continuous = continuous  # true if continuous
-        self.exact = exact  # exact computation of R
         self.mapping = self._init_matrices()
         self.full_leakage_score = None
         return
@@ -337,19 +336,10 @@ class CorrelationClustering(BaseClustering):
         H_t, H_prime_t = self.H.transpose(), self.H_prime.transpose()
 
         if self.is_continuous:
-            if self.exact:
-                # U = scipy.sparse.linalg.expm(-tau * H)
-                U = scipy.linalg.expm(-tau * H)
-                U = U @ U.transpose()
-                R = H @ U + U @ H_t - H_prime @ U - U @ H_prime_t
-
-            else:  # approx computation
-                R0 = H + H_t - H_prime - H_prime_t
-
-                R1 = (H @ H + H_t @ H_t + 2 * H @ H_t) \
-                     - 1 * (H_prime @ H + H_prime @ H_t + H @ H_prime_t + H_t @ H_prime_t)
-
-                R = R0 - (tau * R1)
+            # U = scipy.sparse.linalg.expm(-tau * H)
+            U = scipy.linalg.expm(-tau * H)
+            U = U @ U.transpose()
+            R = H @ U + U @ H_t - H_prime @ U - U @ H_prime_t
 
         else:  # discrete method
             R = -H @ H_t + H_prime @ H_prime_t
@@ -380,9 +370,9 @@ class CorrelationClustering(BaseClustering):
             if tau not in clusterings:
                 clusterings[tau] = []
             method_ = f'{self.method}-C' if self.is_continuous else f'{self.method}-D'
-            method = f'{method_}-exact' if self.exact else method_
+            method = f'MC-{method_}' if isinstance(self, MarkovClustering) else method_
 
-            desc = f'Corr {method} ..'
+            desc = f'{self.__class__.__name__} {method} ..'
             best_clustering = None
             best_score = None
 
@@ -545,16 +535,15 @@ class MarkovClustering(CorrelationClustering):
     _METHODS = ['Diff', 'RW']
 
     def __init__(self, method: str, continuous: bool, paths: Paths, input_graph: nx.Graph,
-                 ground_truth_clustering: NodeClustering, exact: bool = True):
+                 ground_truth_clustering: NodeClustering):
 
         super().__init__(paths=paths, input_graph=input_graph, ground_truth_clustering=ground_truth_clustering,
-                         method=method)
+                         method=method, continuous=continuous)
         assert method in MarkovClustering._METHODS, f'Incorrect {method!r} pick from {MarkovClustering._METHODS}'
         self.method = method
 
         assert isinstance(continuous, bool)
         self.is_continuous = continuous  # true if continuous
-        self.exact = exact  # exact computation of R
         self.mapping = self._init_matrices()
         return
 
@@ -615,8 +604,27 @@ class MarkovClustering(CorrelationClustering):
 
         if self.is_continuous:
             R = (self.Pi @ scipy.linalg.expm(-tau * self.H)) - self.Pi_steady
-
+        self.full_leakage_score = np.sum(R)  # every node is in its own community
         return R
+
+    def _run_method(self, G, R):
+        d = corr_leakage_partitions(G=G, R=R)
+        q = deque(d, maxlen=1)
+        clustering = q.pop()
+        inv_mapping = {v: k for k, v in self.mapping.items()}
+        mapped_cluster = []
+        for cluster in clustering:
+            c = [inv_mapping[x] for x in cluster]
+            mapped_cluster.append(c)
+
+        leakage_score = quality_score(partition=clustering, R=R)
+        leakage_diff = round(self.full_leakage_score - leakage_score, 5)
+
+        clustering = NodeClustering(graph=self.input_graph, method_name=self.method, communities=mapped_cluster,
+                                    method_parameters={'full_leakage_score': self.full_leakage_score,
+                                                       'leakage_score': leakage_score, 'leakage_diff': leakage_diff})
+
+        return clustering
 
 
 class OtherClustering(BaseClustering):
@@ -952,10 +960,11 @@ if __name__ == '__main__':
     paths = Paths(basedir='../')
     avg_k = 15
     mu = 0.2
-    lfr = LFRGraph(paths=paths, n=1000, mu=mu, avg_k=avg_k)
-    g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=1)
-    # g, g.name = nx.barbell_graph(4, 5), 'barbell'
-    # ground_truth_clustering = NodeClustering(communities=[[0, 1, 2, 3], [4, 5, 6, 7, 8], [9, 10, 11, 12]], graph=g)
+    # lfr = LFRGraph(paths=paths, n=1000, mu=mu, avg_k=avg_k)
+    # g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=1)
+
+    g, g.name = nx.barbell_graph(4, 5), 'barbell'
+    ground_truth_clustering = NodeClustering(communities=[[0, 1, 2, 3], [4, 5, 6, 7, 8], [9, 10, 11, 12]], graph=g)
 
     # method = 'label_propagation'
     # other_clustering = OtherClustering(paths=paths, input_graph=g, ground_truth_clustering=ground_truth_clustering,
@@ -973,9 +982,15 @@ if __name__ == '__main__':
 
     # louvain_comms = nx.community.louvain_communities(g)
 
-    method = 'CO'
-    corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=True, method=method,
-                                         ground_truth_clustering=ground_truth_clustering, exact=True)
+    # method = 'CO'
+    # corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=True, method=method,
+    #                                      ground_truth_clustering=ground_truth_clustering)
+    #
+    # clusterings, best_clusterings = corr_cluster.run(num_trials=5, write_stats=True, overwrite=True)
+    # clusterings
 
-    clusterings, best_clusterings = corr_cluster.run(num_trials=5, write_stats=True, overwrite=True)
+    method = 'RW'
+    markov_cluster = MarkovClustering(paths=paths, input_graph=g, continuous=True, method=method,
+                                      ground_truth_clustering=ground_truth_clustering)
+    clusterings, best_clusterings = markov_cluster.run(num_trials=5, write_stats=True, overwrite=True)
     clusterings

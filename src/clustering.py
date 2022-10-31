@@ -12,13 +12,13 @@ from typing import Tuple, Dict
 
 import cdlib
 import igraph as ig
-import infomap
+# import infomap
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 import scipy.sparse
 import scipy.sparse.linalg
-from cdlib import NodeClustering, algorithms
+from cdlib import NodeClustering  # , algorithms
 from cdlib.evaluation import normalized_mutual_information, adjusted_mutual_information
 from cdlib.utils import convert_graph_formats
 from tqdm.auto import tqdm
@@ -234,7 +234,8 @@ class CorrelationClustering(BaseClustering):
     main idea: avoid recalculation of objects that don't change - esp matrices
     """
 
-    _METHODS = ['GW', 'RW', 'Diff']  # CL = Correlation leakage, # GW = GraphWalk, RW = RandomWalk, Diff = Diffusion
+    _METHODS = ['GW', 'RW', 'Diff',
+                'CO']  # CL = Correlation leakage, # GW = GraphWalk, RW = RandomWalk, Diff = Diffusion
 
     def __init__(self, method: str, continuous: bool, paths: Paths, input_graph: nx.Graph,
                  ground_truth_clustering: NodeClustering, exact: bool = True):
@@ -298,6 +299,20 @@ class CorrelationClustering(BaseClustering):
                 D_inv = np.diag((1 / self.d).flatten())
                 self.H = self.A @ D_inv
                 self.H_prime = self.A_prime @ D_inv
+                ## TODO: add consensus
+
+        elif self.method == 'CO':  # consensus
+            if self.is_continuous:
+                n = self.input_graph.order()
+                # I = scipy.sparse.eye(n, n)
+                I = np.eye(n, n)
+                # D_inv = scipy.sparse.diags((1 / self.d).flatten())
+                D_inv = np.diag((1 / self.d).flatten())
+
+                self.H = I - (D_inv @ self.A)
+                self.H_prime = I - (D_inv @ self.A_prime)  # I_prime and D_inv_prime should be the same
+            else:
+                raise NotImplementedError()
         else:
             raise Exception()
 
@@ -413,7 +428,7 @@ class CorrelationClustering(BaseClustering):
                                                              running_time=time_taken, tau=tau, tau_ix=tau_ix,
                                                              tau_max=self.tau_max, tau_diff=self.tau_diff,
                                                              mu=mu, avg_k=avg_k, max_k=max_k,
-                                                             timestamp=timestamp, leakage_score=leakage_score,
+                                                             timestamp=timestamp,  # leakage_score=leakage_score,
                                                              metric='leakage_score', score=leakage_score,
                                                              output_cluster_path=cluster_path)
                 clustering_stats['method'] = method  # methods with augmented 'D' or 'C"
@@ -524,6 +539,84 @@ class CorrelationClustering(BaseClustering):
                                                        'leakage_score': leakage_score, 'leakage_diff': leakage_diff})
 
         return clustering
+
+
+class MarkovClustering(CorrelationClustering):
+    _METHODS = ['Diff', 'RW']
+
+    def __init__(self, method: str, continuous: bool, paths: Paths, input_graph: nx.Graph,
+                 ground_truth_clustering: NodeClustering, exact: bool = True):
+
+        super().__init__(paths=paths, input_graph=input_graph, ground_truth_clustering=ground_truth_clustering,
+                         method=method)
+        assert method in MarkovClustering._METHODS, f'Incorrect {method!r} pick from {MarkovClustering._METHODS}'
+        self.method = method
+
+        assert isinstance(continuous, bool)
+        self.is_continuous = continuous  # true if continuous
+        self.exact = exact  # exact computation of R
+        self.mapping = self._init_matrices()
+        return
+
+    def _init_matrices(self):
+        # numpy is a lot faster than scipy sparse
+        mapping = {u: i for i, u in enumerate(sorted(self.input_graph.nodes))}
+        n, m = self.input_graph.order(), self.input_graph.size()
+
+        # self.A = nx.to_scipy_sparse_array(self.input_graph, dtype='d', weight=1,  # unweighted graphs only
+        #                                   nodelist=sorted(self.input_graph.nodes()))
+        self.A = nx.to_numpy_array(self.input_graph, dtype='d', weight=1, nodelist=sorted(self.input_graph.nodes))
+
+        self.d = self.A @ np.ones((n, 1))  # n x 1 degree vector
+        self.D = np.diag(self.d.flatten())
+        # self.D = scipy.sparse.diags(self.d.flatten())
+
+        self.A_prime = (self.d @ np.transpose(self.d)) / (2 * m)  # null model
+
+        if self.method == 'Diff':
+            if self.is_continuous:
+                self.H = self.D - self.A
+                self.Pi = np.eye(n) / n
+                self.Pi_steady = np.ones((n, n)) / n ** 2
+            else:
+                raise NotImplementedError()
+
+        elif self.method == 'RW':
+            if self.is_continuous:
+                I = np.eye(n, n)
+                D_inv = np.diag((1 / self.d).flatten())
+                self.H = I - (self.A @ D_inv)
+
+                self.Pi = self.D / (2 * m)
+                self.Pi_steady = self.A_prime / (2 * m)
+        else:
+            raise Exception()
+
+        self.tau_max = 1 / abs(
+            scipy.sparse.linalg.eigs(self.H, k=1, return_eigenvectors=False)[0])  # to make sure it's non-negative
+
+        # tau_diff is inverse of the second smallest non-zero eigenvalue of H
+        # sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H.toarray(), right=False)))
+        sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H, right=False)))
+        second_smallest_eig = None
+        for eig in sorted_eigenvals:
+            if not np.isclose(eig, 0):
+                second_smallest_eig = eig
+                break
+        assert second_smallest_eig is not None, f'second smallest eigenvalue is None!!'
+        self.tau_diff = 1 / second_smallest_eig
+
+        return mapping
+
+    def generate_R_matrix(self, tau: float = None):
+        """
+        Construct the R matrix for the different methods
+        """
+
+        if self.is_continuous:
+            R = (self.Pi @ scipy.linalg.expm(-tau * self.H)) - self.Pi_steady
+
+        return R
 
 
 class OtherClustering(BaseClustering):
@@ -858,18 +951,18 @@ if __name__ == '__main__':
 
     paths = Paths(basedir='../')
     avg_k = 15
-    mu = 0.6
+    mu = 0.2
     lfr = LFRGraph(paths=paths, n=1000, mu=mu, avg_k=avg_k)
     g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=1)
     # g, g.name = nx.barbell_graph(4, 5), 'barbell'
     # ground_truth_clustering = NodeClustering(communities=[[0, 1, 2, 3], [4, 5, 6, 7, 8], [9, 10, 11, 12]], graph=g)
 
-    method = 'label_propagation'
-    other_clustering = OtherClustering(paths=paths, input_graph=g, ground_truth_clustering=ground_truth_clustering,
-                                       method=method)
-    other_clustering.run(num_trials=1, overwrite=True)
-
-    cdlib.algorithms.greedy_modularity()
+    # method = 'label_propagation'
+    # other_clustering = OtherClustering(paths=paths, input_graph=g, ground_truth_clustering=ground_truth_clustering,
+    #                                    method=method)
+    # other_clustering.run(num_trials=1, overwrite=True)
+    #
+    # cdlib.algorithms.greedy_modularity()
     # sizes = [20, 20, 20]
     # probs = [[0.25, 0.02, 0.02], [0.02, 0.35, 0.02], [0.02, 0.02, 0.40]]
 
@@ -880,9 +973,9 @@ if __name__ == '__main__':
 
     # louvain_comms = nx.community.louvain_communities(g)
 
-    # method = 'GW'
-    # corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=True, method=method,
-    #                                      ground_truth_clustering=ground_truth_clustering, exact=True)
-    #
-    # clusterings, best_clusterings = corr_cluster.run(num_trials=5, write_stats=True, overwrite=True)
-    # clusterings
+    method = 'CO'
+    corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=True, method=method,
+                                         ground_truth_clustering=ground_truth_clustering, exact=True)
+
+    clusterings, best_clusterings = corr_cluster.run(num_trials=5, write_stats=True, overwrite=True)
+    clusterings

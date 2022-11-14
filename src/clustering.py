@@ -12,13 +12,13 @@ from typing import Tuple, Dict
 
 import cdlib
 import igraph as ig
-# import infomap
+import infomap
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 import scipy.sparse
 import scipy.sparse.linalg
-from cdlib import NodeClustering  # , algorithms
+from cdlib import NodeClustering, algorithms
 from cdlib.evaluation import normalized_mutual_information, adjusted_mutual_information
 from cdlib.utils import convert_graph_formats
 from tqdm.auto import tqdm
@@ -122,14 +122,14 @@ def leiden(
 
 class BaseClustering:
     def __init__(self, paths: Paths, input_graph: nx.Graph,
-                 ground_truth_clustering: NodeClustering, method: str):
+                 ground_truth_clustering: NodeClustering, method: str, family: str = 'LFR'):
         self.paths = paths
         self.method = method
         self.input_graph = input_graph
         assert input_graph.name != '', f'Input graph name is blank.'
         self.name = input_graph.name
         self.ground_truth_clustering = ground_truth_clustering
-        self.output_cluster_base = self.paths.results_dir / 'LFR' / self.method
+        self.output_cluster_base = self.paths.results_dir / family / self.method
         return
 
     @abc.abstractmethod
@@ -140,7 +140,10 @@ class BaseClustering:
         file_exists = stats_path.exists()
         round_cols = ['mu', 'running_time', 'modularity', 'NMI', 'EC', 'AMI']
 
-        if isinstance(self, CorrelationClustering):
+        class_name = self.__class__.__name__
+
+        # if isinstance(self, CorrelationClustering) or isinstance(self, MarkovClustering):
+        if class_name in ['CorrelationClustering', 'MarkovClustering', 'MultiLouvainClustering']:
             columns = ['timestamp', 'name', 'mu', 'avg_k', 'max_k',
                        'method', 'tau_max', 'tau_diff', 'tau_ix', 'tau', 'orig_clusters', 'running_time',
                        'metric', 'score',
@@ -152,7 +155,8 @@ class BaseClustering:
                        'running_time', 'num_clusters', 'modularity', 'NMI', 'AMI', 'EC', 'output_cluster_path']
 
         for col in round_cols:
-            stats_dict[col] = round(stats_dict[col], 4)
+            if stats_dict[col] is not None:
+                stats_dict[col] = round(stats_dict[col], 4)
 
         with open(stats_path, 'a') as f:
             csv_writer = csv.DictWriter(f, fieldnames=columns)
@@ -235,21 +239,36 @@ class CorrelationClustering(BaseClustering):
     """
 
     _METHODS = ['GW', 'RW', 'Diff',
-                'CO']  # GW=GraphWalk, RW=RandomWalk, Diff=Diffusion, CO=Consensus
+                'CO', 'MultiLouvain']  # GW=GraphWalk, RW=RandomWalk, Diff=Diffusion, CO=Consensus
 
     def __init__(self, method: str, continuous: bool, paths: Paths, input_graph: nx.Graph,
-                 ground_truth_clustering: NodeClustering):
+                 ground_truth_clustering: NodeClustering, erdos_renyi_null: bool = False, family: str = 'LFR'):
 
         super().__init__(paths=paths, input_graph=input_graph, ground_truth_clustering=ground_truth_clustering,
-                         method=method)
+                         method=method, family=family)
         assert method in CorrelationClustering._METHODS, f'Incorrect {method!r} pick from {CorrelationClustering._METHODS}'
         self.method = method
-
+        self.erdos_renyi_null = erdos_renyi_null
         assert isinstance(continuous, bool)
         self.is_continuous = continuous  # true if continuous
         self.mapping = self._init_matrices()
         self.full_leakage_score = None
         return
+
+    def generate_taus(self):
+        """
+        Return a list of taus
+        """
+        # taus_1 = np.geomspace(np.finfo(float).eps, self.tau_max, num=5)
+        # taus_2 = np.geomspace(self.tau_max, self.tau_diff, num=5)[1:]  # prevent tau_max from getting double counted
+
+        taus_1 = np.linspace(np.finfo(float).eps, self.tau_max, num=5)
+        # taus_2 = np.linspace(self.tau_max, self.tau_diff, num=10)[1:]  # prevent tau_max from getting double counted
+        taus_2 = np.geomspace(self.tau_max, self.tau_diff, num=10)[1:]  # prevent tau_max from getting double counted
+
+        taus = np.concatenate([taus_1, taus_2])
+
+        return taus
 
     def _init_matrices(self):
         # numpy is a lot faster than scipy sparse
@@ -260,12 +279,17 @@ class CorrelationClustering(BaseClustering):
         # self.A = nx.to_scipy_sparse_array(self.input_graph, dtype='d', weight=1,  # unweighted graphs only
         #                                   nodelist=sorted(self.input_graph.nodes()))
         self.A = nx.to_numpy_array(self.input_graph, dtype='d', weight=1, nodelist=sorted(self.input_graph.nodes))
-
         self.d = self.A @ np.ones((n, 1))  # n x 1 degree vector
         self.D = np.diag(self.d.flatten())
-        # self.D = scipy.sparse.diags(self.d.flatten())
 
-        self.A_prime = (self.d @ np.transpose(self.d)) / (2 * m)  # null model
+        if self.erdos_renyi_null:
+            self.A_prime = np.ones((n, n)) * (2 * m / (n * (n - 1)))
+            self.d_prime = self.A_prime @ np.ones((n, 1))  # n x 1 degree vector
+            self.D_prime = np.diag(self.d_prime.flatten())
+        else:  # configuration model null model
+            self.A_prime = (self.d @ np.transpose(self.d)) / (2 * m)  # null model
+            self.d_prime = self.A_prime @ np.ones((n, 1))  # n x 1 degree vector
+            self.D_prime = np.diag(self.d_prime.flatten())
 
         if self.method == 'GW':
             if self.is_continuous:
@@ -278,7 +302,7 @@ class CorrelationClustering(BaseClustering):
         elif self.method == 'Diff':
             if self.is_continuous:
                 self.H = self.D - self.A
-                self.H_prime = self.D - self.A_prime  # D_prime should equal D
+                self.H_prime = self.D_prime - self.A_prime  # D_prime should equal D
             else:
                 raise NotImplementedError()
 
@@ -289,16 +313,18 @@ class CorrelationClustering(BaseClustering):
                 I = np.eye(n, n)
                 # D_inv = scipy.sparse.diags((1 / self.d).flatten())
                 D_inv = np.diag((1 / self.d).flatten())
+                D_inv_prime = np.diag((1 / self.d_prime).flatten())
 
                 self.H = I - (self.A @ D_inv)
-                self.H_prime = I - (self.A_prime @ D_inv)  # I_prime and D_inv_prime should be the same
+                self.H_prime = I - (self.A_prime @ D_inv_prime)  # I_prime and D_inv_prime should be the same
 
             else:
                 # D_inv = scipy.sparse.diags((1 / self.d).flatten())
                 D_inv = np.diag((1 / self.d).flatten())
+                D_inv_prime = np.diag((1 / self.d_prime).flatten())
+
                 self.H = self.A @ D_inv
-                self.H_prime = self.A_prime @ D_inv
-                ## TODO: add consensus
+                self.H_prime = self.A_prime @ D_inv_prime
 
         elif self.method == 'CO':  # consensus
             if self.is_continuous:
@@ -307,9 +333,10 @@ class CorrelationClustering(BaseClustering):
                 I = np.eye(n, n)
                 # D_inv = scipy.sparse.diags((1 / self.d).flatten())
                 D_inv = np.diag((1 / self.d).flatten())
+                D_inv_prime = np.diag((1 / self.d_prime).flatten())
 
                 self.H = I - (D_inv @ self.A)
-                self.H_prime = I - (D_inv @ self.A_prime)  # I_prime and D_inv_prime should be the same
+                self.H_prime = I - (D_inv_prime @ self.A_prime)  # I_prime and D_inv_prime should be the same
             else:
                 raise NotImplementedError()
         else:
@@ -339,26 +366,42 @@ class CorrelationClustering(BaseClustering):
             # U = scipy.sparse.linalg.expm(-tau * H)
             U = scipy.linalg.expm(-tau * H)
             U = U @ U.transpose()
+
+            if np.isnan(U).any():
+                print(f'U matrix has NaNs!!')
+                exit(1)
+
             R = H @ U + U @ H_t - H_prime @ U - U @ H_prime_t
 
         else:  # discrete method
             R = -H @ H_t + H_prime @ H_prime_t
 
+        if np.isnan(R).any():
+            mu = self.input_graph.graph.get('mu', np.nan)
+            print(f'R matrix has NaNs for {self.method=} {mu=} {tau=}!!')
+            exit(1)
+
+        R = R * -1  # to maximize inside
         self.full_leakage_score = np.sum(R)  # every node is in its own community
         # assert not np.isclose(self.full_leakage_score, 0), f'Leakage score is 0 for {self.method} {tau=:.4g}'
         return R
 
     def run(self, num_trials: int, overwrite: bool, write_stats: bool = True, try_merging: bool = False):
         # running the method num_trials many times
-        stats_path = self.paths.results_dir / 'stats_CL.csv'
+        class_name = self.__class__.__name__
+        if class_name == 'CorrelationClustering':
+            stats_path = self.paths.results_dir / 'stats_CL.csv'
+        elif class_name == 'MarkovClustering':
+            stats_path = self.paths.results_dir / 'stats_MC.csv'
+        elif class_name == 'MultiLouvainClustering':
+            stats_path = self.paths.results_dir / 'stats_ML.csv'
+        else:
+            raise NotImplementedError(f'Invalid stats_path error {self.__name__}')
 
         if not self.is_continuous:
             taus = [-1]
         else:
-            # taus = np.linspace(0, self.tau_max, 5)  # change to log scale
-            taus_1 = np.geomspace(np.finfo(float).eps, self.tau_max, num=5)
-            taus_2 = np.geomspace(self.tau_max, self.tau_diff, num=5)[1:]  # prevent tau_max from getting double counted
-            taus = np.concatenate([taus_1, taus_2])
+            taus = self.generate_taus()
 
         clusterings = {}
         best_clusterings = {}  # store the best clustering for each tau
@@ -370,9 +413,19 @@ class CorrelationClustering(BaseClustering):
             if tau not in clusterings:
                 clusterings[tau] = []
             method_ = f'{self.method}-C' if self.is_continuous else f'{self.method}-D'
-            method = f'MC-{method_}' if isinstance(self, MarkovClustering) else method_
+            if self.__class__.__name__ == "MarkovClustering":
+                method = f'MC-{method_}'
+            elif self.__class__.__name__ == 'MultiLouvainClustering':
+                method = f'MultiLouvain'
+            else:
+                method = method_
 
-            desc = f'{self.__class__.__name__} {method} ..'
+            if self.erdos_renyi_null:
+                method = f'{method_}-ER'
+
+            mu = self.input_graph.graph.get('mu', np.nan)
+            self.input_graph.graph.get('avg_k', np.nan)
+            desc = f'{self.__class__.__name__} {method} {mu=} {tau_ix=} ..'
             best_clustering = None
             best_score = None
 
@@ -427,7 +480,6 @@ class CorrelationClustering(BaseClustering):
         return clusterings, best_clusterings
 
     def _run_method(self, G, R):
-        R = R * -1
         d = corr_leakage_partitions(G=G, R=R)
         q = deque(d, maxlen=1)
         clustering = q.pop()
@@ -446,99 +498,15 @@ class CorrelationClustering(BaseClustering):
 
         return clustering
 
-    def _run_method_old(self, R, try_merging=False):
-        # store clusters as list of sets of nodes, flatten them out at the end of each iteration
-        R = R * -1  # to maximize
-
-        communities = [[{u}] for u in self.input_graph.nodes()]
-        super_nodes = [{u} for u in self.input_graph.nodes()]  # list of flattened supernodes
-        mapping = {u: i for i, u in enumerate(sorted(self.input_graph.nodes()))}
-        random.shuffle(super_nodes)
-
-        changed = True
-        while changed:
-            changed = False
-
-            for s_i in super_nodes:
-                # figure out the current community where s_i is in
-                s_i_comm_ix = None
-                for i, comm in enumerate(communities):
-                    if s_i in comm:
-                        s_i_comm_ix = i
-                        break
-                assert s_i_comm_ix is not None, f's_i index is None'
-
-                d_i = communities[s_i_comm_ix]
-                # loss of s_i leaving its own community
-                loss = 0
-                for s_j in d_i:
-                    if s_i == s_j:
-                        continue
-                    for i in s_i:
-                        for j in s_j:
-                            loss -= 2 * R[mapping[i], mapping[j]]
-
-                # check other communities for s_i to merge with
-                max_gain = 0
-                best_community_ix = None
-
-                # use networkx cuts?
-                for ix_2, d_j in enumerate(communities):
-                    if s_i_comm_ix == ix_2:  # skip over s_i's own community
-                        continue
-                    for s_j in d_j:
-                        if nx.cut_size(self.input_graph, s_i, s_j) == 0:
-                            continue
-
-                        gain = 0
-                        for i in s_i:
-                            for j in s_j:
-                                gain += 2 * R[mapping[i], mapping[j]]
-
-                        if gain > max_gain:
-                            max_gain = gain
-                            best_community_ix = ix_2
-
-                change_in_quality = max_gain + loss
-                if best_community_ix is not None and change_in_quality > 0:
-                    changed = True
-                    communities[best_community_ix].append(s_i)  # add s_i to its new community
-
-                    # move s_i from its previous community to its new community  # TODO: change this to
-                    communities[s_i_comm_ix].remove(s_i)
-                    if len(communities[s_i_comm_ix]) == 0:  # the community is empty
-                        del communities[s_i_comm_ix]
-
-            # flatten the communities at the end
-            super_nodes = [set.union(*s_i) for s_i in communities]  # note the lack of inner list
-            communities = [[set.union(*s_i)] for s_i in
-                           communities]  # notice the outer list inside: communities are list of sets
-
-        communities = [list(comm[0]) for comm in communities if len(comm) > 0]
-        # calculate leakage score based on the clustering found
-        leakage_score = 0
-        for comm in communities:
-            for i, j in itertools.combinations_with_replacement(comm, 2):  # to account for diagonals
-                leakage_score += 2 * R[mapping[i], mapping[j]]
-
-        leakage_score -= np.trace(R)  # to prevent diagonals from getting counted twice
-        leakage_diff = round(self.full_leakage_score - leakage_score, 5)
-
-        clustering = NodeClustering(graph=self.input_graph, method_name=self.method, communities=communities,
-                                    method_parameters={'full_leakage_score': self.full_leakage_score,
-                                                       'leakage_score': leakage_score, 'leakage_diff': leakage_diff})
-
-        return clustering
-
 
 class MarkovClustering(CorrelationClustering):
-    _METHODS = ['Diff', 'RW']
+    _METHODS = ['Diff', 'RW', 'MultiLouvain']
 
     def __init__(self, method: str, continuous: bool, paths: Paths, input_graph: nx.Graph,
-                 ground_truth_clustering: NodeClustering):
+                 ground_truth_clustering: NodeClustering, family: str = 'LFR'):
 
         super().__init__(paths=paths, input_graph=input_graph, ground_truth_clustering=ground_truth_clustering,
-                         method=method, continuous=continuous)
+                         method=method, continuous=continuous, family=family)
         assert method in MarkovClustering._METHODS, f'Incorrect {method!r} pick from {MarkovClustering._METHODS}'
         self.method = method
 
@@ -603,36 +571,85 @@ class MarkovClustering(CorrelationClustering):
         """
 
         if self.is_continuous:
-            R = (self.Pi @ scipy.linalg.expm(-tau * self.H)) - self.Pi_steady
+            R = (scipy.linalg.expm(-tau * self.H) @ self.Pi) - self.Pi_steady
         self.full_leakage_score = np.sum(R)  # every node is in its own community
         return R
 
-    def _run_method(self, G, R):
-        d = corr_leakage_partitions(G=G, R=R)
-        q = deque(d, maxlen=1)
-        clustering = q.pop()
-        inv_mapping = {v: k for k, v in self.mapping.items()}
-        mapped_cluster = []
-        for cluster in clustering:
-            c = [inv_mapping[x] for x in cluster]
-            mapped_cluster.append(c)
 
-        leakage_score = quality_score(partition=clustering, R=R)
-        leakage_diff = round(self.full_leakage_score - leakage_score, 5)
+class MultiLouvainClustering(MarkovClustering):
+    def __init__(self, paths: Paths, input_graph: nx.Graph,
+                 ground_truth_clustering: NodeClustering, method=f'MultiLouvain', continuous: bool = True,
+                 family: str = 'LFR'):
 
-        clustering = NodeClustering(graph=self.input_graph, method_name=self.method, communities=mapped_cluster,
-                                    method_parameters={'full_leakage_score': self.full_leakage_score,
-                                                       'leakage_score': leakage_score, 'leakage_diff': leakage_diff})
+        super().__init__(paths=paths, input_graph=input_graph, ground_truth_clustering=ground_truth_clustering,
+                         method=method, family=family, continuous=True)
+        self.method = method
 
-        return clustering
+        assert isinstance(continuous, bool)
+        self.is_continuous = continuous  # true if continuous
+        self.mapping = self._init_matrices()
+        return
+
+    def _init_matrices(self):
+        # numpy is a lot faster than scipy sparse
+        mapping = {u: i for i, u in enumerate(sorted(self.input_graph.nodes))}
+        n, m = self.input_graph.order(), self.input_graph.size()
+
+        # self.A = nx.to_scipy_sparse_array(self.input_graph, dtype='d', weight=1,  # unweighted graphs only
+        #                                   nodelist=sorted(self.input_graph.nodes()))
+        self.A = nx.to_numpy_array(self.input_graph, dtype='d', weight=1, nodelist=sorted(self.input_graph.nodes))
+
+        self.d = self.A @ np.ones((n, 1))  # n x 1 degree vector
+        self.D = np.diag(self.d.flatten())
+        # self.D = scipy.sparse.diags(self.d.flatten())
+
+        self.A_prime = (self.d @ np.transpose(self.d)) / (2 * m)  # null model
+
+        if self.is_continuous:
+            I = np.eye(n, n)
+            D_inv = np.diag((1 / self.d).flatten())
+            self.H = I - (self.A @ D_inv)
+
+            self.Pi = self.D / (2 * m)
+            self.Pi_steady = self.A_prime / (2 * m)
+
+        self.tau_max = 1 / abs(
+            scipy.sparse.linalg.eigs(self.H, k=1, return_eigenvectors=False)[0])  # to make sure it's non-negative
+
+        # tau_diff is inverse of the second smallest non-zero eigenvalue of H
+        # sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H.toarray(), right=False)))
+        sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H, right=False)))
+        second_smallest_eig = None
+        for eig in sorted_eigenvals:
+            if not np.isclose(eig, 0):
+                second_smallest_eig = eig
+                break
+        assert second_smallest_eig is not None, f'second smallest eigenvalue is None!!'
+        self.tau_diff = 1 / second_smallest_eig
+
+        return mapping
+
+    def generate_R_matrix(self, tau: float = None):
+        """
+        Construct the R matrix for the different methods
+        """
+        # R = (self.Pi @ scipy.linalg.expm(-tau * self.H)) - self.Pi_steady
+        if np.isclose(tau, 0):
+            tau = np.finfo(float).eps
+
+        R = self.A - (self.A_prime * 1 / tau)
+
+        self.full_leakage_score = np.sum(R)  # every node is in its own community
+        return R
 
 
 class OtherClustering(BaseClustering):
     _METHODS = ['louvain', 'greedy_modularity', 'label_propagation', 'infomap', 'leiden', 'eigenvector',
                 'sbm_dl', 'sbm_dl_nested']
 
-    def __init__(self, paths: Paths, input_graph: nx.Graph, method: str, ground_truth_clustering: NodeClustering):
-        super().__init__(paths=paths, input_graph=input_graph, method=method,
+    def __init__(self, paths: Paths, input_graph: nx.Graph, method: str, ground_truth_clustering: NodeClustering,
+                 family: str = 'LFR'):
+        super().__init__(paths=paths, input_graph=input_graph, method=method, family=family,
                          ground_truth_clustering=ground_truth_clustering)
         self.method = method
         assert method in OtherClustering._METHODS, f'Incorrect method: {method!r}, pick from {OtherClustering._METHODS}'
@@ -657,7 +674,8 @@ def quality_score(partition, R):
     leakage_score = 0
     for comm in partition:
         for i, j in itertools.combinations_with_replacement(comm, 2):  # to account for diagonals
-            leakage_score += 2 * R[i, j]
+            # leakage_score += 2 * R[i, j]
+            leakage_score += (R[i, j] + R[j, i])
     leakage_score -= np.trace(R)  # to prevent diagonals from getting double counted
     return leakage_score
 
@@ -674,13 +692,14 @@ def shrink_R_matrix(comm, R):
         comm_i = comm[i]
         for j in range(i, new_clusters):
             comm_j = comm[j]
-            val = 0
+            val_1, val_2 = 0, 0
             for x in comm_i:
                 for y in comm_j:
-                    val += R[x, y]
+                    val_1 += R[x, y]
+                    val_2 += R[y, x]
 
-            new_R[i, j] = val
-            new_R[j, i] = val
+            new_R[i, j] = val_1
+            new_R[j, i] = val_2
 
     return new_R
 
@@ -697,6 +716,8 @@ def _one_level(G, partition, R):
     random.shuffle(rand_nodes)
     nb_moves = 1
     improvement = False
+    # TODO: add stopping condition based on frac of nodes changing clusters in the current graph OR nodes in the original graph
+    # TODO: nodes in the original graph is stored as "com"
     while nb_moves > 0:
         nb_moves = 0
         for u in rand_nodes:
@@ -707,7 +728,8 @@ def _one_level(G, partition, R):
             for v in inner_partition[best_com]:
                 if v == u:  # should we skip diagonals?
                     continue
-                remove_cost -= 2 * R[u, v]
+                # remove_cost -= 2 * R[u, v]
+                remove_cost -= (R[u, v] + R[v, u])  # R can be asymmetric
 
             weights2com = _neighbor_weights(nbrs[u], node2com)
             for nbr_com in weights2com:  # keys of this stores community neighbors of u
@@ -715,7 +737,8 @@ def _one_level(G, partition, R):
                 for v in inner_partition[nbr_com]:  # add if u == v
                     if u == v:
                         continue
-                    gain += 2 * R[u, v]
+                    # gain += 2 * R[u, v]
+                    gain += (R[u, v] + R[v, u])  # R can be asymmetric
                 gain = remove_cost + gain
                 if gain > best_mod:
                     best_mod = gain
@@ -958,13 +981,13 @@ if __name__ == '__main__':
     # TODO: get description length from infomap object
 
     paths = Paths(basedir='../')
-    avg_k = 15
-    mu = 0.2
+    # avg_k = 15
+    # mu = 0.1
     # lfr = LFRGraph(paths=paths, n=1000, mu=mu, avg_k=avg_k)
     # g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=1)
 
-    g, g.name = nx.barbell_graph(4, 5), 'barbell'
-    ground_truth_clustering = NodeClustering(communities=[[0, 1, 2, 3], [4, 5, 6, 7, 8], [9, 10, 11, 12]], graph=g)
+    # g, g.name = nx.barbell_graph(4, 5), 'barbell'
+    # ground_truth_clustering = NodeClustering(communities=[[0, 1, 2, 3], [4, 5, 6, 7, 8], [9, 10, 11, 12]], graph=g)
 
     # method = 'label_propagation'
     # other_clustering = OtherClustering(paths=paths, input_graph=g, ground_truth_clustering=ground_truth_clustering,
@@ -972,25 +995,37 @@ if __name__ == '__main__':
     # other_clustering.run(num_trials=1, overwrite=True)
     #
     # cdlib.algorithms.greedy_modularity()
-    # sizes = [20, 20, 20]
-    # probs = [[0.25, 0.02, 0.02], [0.02, 0.35, 0.02], [0.02, 0.02, 0.40]]
+    sizes = [30, 30, 30]
+    probs = [
+        [0.35, 0.05, 0.05],
+        [0.05, 0.35, 0.10],
+        [0.05, 0.10, 0.35]
+    ]
 
-    # g = nx.stochastic_block_model(sizes, probs, seed=1)
+    g = nx.stochastic_block_model(sizes, probs, seed=1)
+    ground_truth_clustering = NodeClustering(nx.community.louvain_communities(g), graph=g)
+
     # g = nx.ring_of_cliques(51, clique_size=4)
     # g, g.name = nx.barbell_graph(4, 5), 'barbell'
     # ground_truth_clustering = NodeClustering(communities=[[0, 1, 2, 3], [4, 5, 6, 7, 8], [9, 10, 11, 12]], graph=g)
 
     # louvain_comms = nx.community.louvain_communities(g)
 
-    # method = 'CO'
+    # method = 'RW'
+    # er_null_model = False
     # corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=True, method=method,
-    #                                      ground_truth_clustering=ground_truth_clustering)
+    #                                      ground_truth_clustering=ground_truth_clustering, erdos_renyi_null=er_null_model)
     #
-    # clusterings, best_clusterings = corr_cluster.run(num_trials=5, write_stats=True, overwrite=True)
+    # clusterings, best_clusterings = corr_cluster.run(num_trials=5, write_stats=False, overwrite=True)
     # clusterings
 
-    method = 'RW'
-    markov_cluster = MarkovClustering(paths=paths, input_graph=g, continuous=True, method=method,
-                                      ground_truth_clustering=ground_truth_clustering)
-    clusterings, best_clusterings = markov_cluster.run(num_trials=5, write_stats=True, overwrite=True)
-    clusterings
+    # method = 'RW'
+    # markov_cluster = MarkovClustering(paths=paths, input_graph=g, continuous=True, method=method,
+    #                                   ground_truth_clustering=ground_truth_clustering)
+    # clusterings, best_clusterings = markov_cluster.run(num_trials=5, overwrite=True)
+    # clusterings
+
+    louvain_cluster = MultiLouvainClustering(paths=paths, input_graph=g,
+                                             ground_truth_clustering=ground_truth_clustering)
+    clusterings, best_clusterings = louvain_cluster.run(num_trials=5, overwrite=True)
+    best_clusterings

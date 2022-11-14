@@ -27,7 +27,7 @@ class Paths:
             self.basedir: Path = Path('/N/slate/ssikdar/data-dump/corr-cluster')
 
         self.data_dir: Path = self.basedir / 'input'
-        self.results_dir: Path = self.basedir / 'results_new_3'
+        self.results_dir: Path = self.basedir / 'results_new_4'
         self.lfr_dir: Path = self.basedir / 'LFR'
 
         self.results_dir.mkdir(parents=True, exist_ok=True)
@@ -44,7 +44,7 @@ def clusim_ec_score(clustering_1: NodeClustering, clustering_2: NodeClustering):
     return element_sim(Clustering(clu2elm_dict=clu_dict1), Clustering(clu2elm_dict=clu_dict2))
 
 
-def parallel_async(func, args, num_workers=10):
+def parallel_async(func, args, num_workers=10, timeout=None):
     def update_result(result):
         return result
 
@@ -56,10 +56,15 @@ def parallel_async(func, args, num_workers=10):
             async_promises.append(r)
         for r in async_promises:
             try:
-                r.wait()
-                results.append(r.get())
+                r.wait(timeout=timeout)
+                results.append(r.get(timeout=timeout))
+            except TimeoutError:
+                print(f'Timeout after {timeout}s')
             except Exception as e:
-                results.append(r.get())
+                try:
+                    results.append(r.get(timeout=timeout))
+                except TimeoutError:
+                    print(f'Timeout after {timeout}s')
 
     return results
 
@@ -126,14 +131,16 @@ def plot_network_clusters(
         else:
             method = partition.method_name
         title = f'{graph.name!r} \t |V| = {graph.order():,} \t |E| = {graph.size():,}\n' \
-                f'method = {method!r} \t clusters = {len(partition.communities):,} \t modularity = {modularity:.4g}'
+                f'method = {method!r} \t comms = {len(partition.communities):,} \t modularity = {modularity:.4g}'
+
+        if 'tau' in partition.method_parameters:
+            title += rf'   $\tau$: {partition.method_parameters["tau"]:.3g}'
 
         if 'leakage_diff' in partition.method_parameters:
             leakage_diff = partition.method_parameters['leakage_diff']
             full_leakage = partition.method_parameters['full_leakage_score']
             leakage_score = partition.method_parameters['leakage_score']
-
-            title += f'\nLeakage:\tfull: {full_leakage:.4g}\tscore: {leakage_score:.4g}\tdiff:{leakage_diff:.4g}'
+            title += f'\nLeakage:\tfull: {full_leakage:.4f}\tscore: {leakage_score:.4g}\tdiff:{leakage_diff:.4g}'
 
         title = title.replace('\t', '    ')
         ax.set_title(title, fontsize=10)

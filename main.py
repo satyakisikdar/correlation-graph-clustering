@@ -7,13 +7,10 @@ from pathlib import Path
 import networkx as nx
 import numpy as np
 
-from src.clustering import LFRGraph, CorrelationClustering, OtherClustering
-from src.utils import Paths, remove_files, parallel_async
-
-# import mkl
-# mkl.set_num_threads(2)
-
 sys.path.extend(['./', '../'])
+from src.clustering import CorrelationClustering, OtherClustering, MarkovClustering
+from src.utils import Paths, remove_files, parallel_async
+from src.graph_io import LFRGraph
 
 
 def generate_LFR(paths: Paths, LFR_source: str = './LFR', n: int = 1000, mu: float = 0.25, overwrite: bool = False):
@@ -90,7 +87,8 @@ def other_methods_runner(mu, avg_k, trial, method):
 
 def other_methods():
     num_workers = 7
-    methods = ['louvain', 'greedy_modularity', 'label_propagation', 'leiden', 'infomap']
+    # methods = ['louvain', 'greedy_modularity', 'label_propagation', 'leiden', 'infomap', 'sbm_dl', 'sbm_dl_nested']
+    methods = ['leiden', 'louvain']
     args = []
 
     mus = np.linspace(0, 1, 21)
@@ -105,43 +103,75 @@ def other_methods():
     return
 
 
-def corr_cluster_runner(mu, avg_k, trial, method, continuous, exact):
+def corr_cluster_runner(mu, avg_k, trial, method, continuous, erdos_renyi_null_model=False):
     paths = Paths(basedir='./')
     lfr = LFRGraph(mu=mu, paths=paths, n=1000, avg_k=avg_k)
 
     input_g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=trial)
     clustering_method = CorrelationClustering(input_graph=input_g,
                                               ground_truth_clustering=ground_truth_clustering,
-                                              method=method, continuous=continuous, paths=paths, exact=exact)
+                                              method=method, continuous=continuous, paths=paths,
+                                              erdos_renyi_null=erdos_renyi_null_model)
     clustering_method.run(num_trials=10, overwrite=False)
     return
 
 
 def corr_cluster():
-    num_workers = 15
+    num_workers = 10
     args = []
     mus = np.linspace(0, 1, 21)
-    exact = True
+    erdos_renyi_null_model = True
 
     for mu in mus:  # 21
         for avg_k in (15, 20, 25):  # 3
             for trial in range(1, 21):  # 20
-                methods = 'GW', 'RW', 'Diff'
+                methods = ['GW', 'RW', 'Diff', 'CO'][1:]
                 for method in methods:  # 3
                     for continuous in [True, False]:  # 2
-                        if method == 'Diff' and not continuous:
+                        if method in ('Diff', 'CO') and not continuous:
                             continue
-                        args.append((mu, avg_k, trial, method, continuous, exact))  # 10
+                        args.append((mu, avg_k, trial, method, continuous, erdos_renyi_null_model))  # 10
 
     random.shuffle(args)
     parallel_async(func=corr_cluster_runner, args=args, num_workers=num_workers)
     return
 
 
+def markov_cluster_runner(mu, avg_k, trial, method, continuous):
+    paths = Paths(basedir='./')
+    lfr = LFRGraph(mu=mu, paths=paths, n=1000, avg_k=avg_k)
+
+    input_g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=trial)
+    clustering_method = MarkovClustering(input_graph=input_g,
+                                         ground_truth_clustering=ground_truth_clustering,
+                                         method=method, continuous=continuous, paths=paths)
+    clustering_method.run(num_trials=10, overwrite=False)
+    return
+
+
+def markov_cluster():
+    num_workers = 10
+    args = []
+    mus = np.linspace(0, 1, 21)
+    continuous = True
+    methods = ['RW', 'Diff'][1:]
+
+    for mu in mus:  # 21
+        for avg_k in (15, 20, 25):  # 3
+            for trial in range(1, 21):  # 20
+                for method in methods:  # 3
+                    args.append((mu, avg_k, trial, method, continuous))  # 10
+
+    random.shuffle(args)
+    parallel_async(func=markov_cluster_runner, args=args, num_workers=num_workers, timeout=60)
+    return
+
+
 if __name__ == '__main__':
     print('hello')
-    # corr_cluster()
-    other_methods()
+    corr_cluster()
+    # other_methods()
+    # markov_cluster()
 
     # corr_cluster_runner(mu=0.1, avg_k=15, trial=1, method='GW', continuous=True, exact=True)
     #

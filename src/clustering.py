@@ -20,7 +20,6 @@ sys.path.extend(['./', '../'])
 
 from src.utils import Paths, write_clustering, clusim_ec_score
 from src.cluster_helper import corr_leakage_partitions, quality_score, leiden, infomap_runner
-from src.graph_io import LFRGraph
 
 
 class BaseClustering:
@@ -177,11 +176,19 @@ class CorrelationClustering(BaseClustering):
         # numpy is a lot faster than scipy sparse
 
         mapping = {u: i for i, u in enumerate(sorted(self.input_graph.nodes))}
-        n, m = self.input_graph.order(), self.input_graph.size()
-
+        # n, m = self.input_graph.order(), self.input_graph.size()
         # self.A = nx.to_scipy_sparse_array(self.input_graph, dtype='d', weight=1,  # unweighted graphs only
         #                                   nodelist=sorted(self.input_graph.nodes()))
-        self.A = nx.to_numpy_array(self.input_graph, dtype='d', weight=1, nodelist=sorted(self.input_graph.nodes))
+        # self.A = nx.to_numpy_array(self.input_graph, dtype='d', weight=1, nodelist=sorted(self.input_graph.nodes))
+
+        self.A = nx.to_numpy_array(self.input_graph, dtype='d', weight='weight',
+                                   nodelist=sorted(self.input_graph.nodes))
+
+        for isolated_node in nx.isolates(self.input_graph):
+            self.A[mapping[isolated_node], mapping[isolated_node]] = 1
+
+        n, m = self.A.shape[0], np.sum(self.A) / 2
+
         self.d = self.A @ np.ones((n, 1))  # n x 1 degree vector
         self.D = np.diag(self.d.flatten())
 
@@ -189,6 +196,7 @@ class CorrelationClustering(BaseClustering):
             self.A_prime = np.ones((n, n)) * (2 * m / (n * (n - 1)))
             self.d_prime = self.A_prime @ np.ones((n, 1))  # n x 1 degree vector
             self.D_prime = np.diag(self.d_prime.flatten())
+
         else:  # configuration model null model
             self.A_prime = (self.d @ np.transpose(self.d)) / (2 * m)  # null model
             self.d_prime = self.A_prime @ np.ones((n, 1))  # n x 1 degree vector
@@ -421,11 +429,18 @@ class MarkovClustering(CorrelationClustering):
     def _init_matrices(self):
         # numpy is a lot faster than scipy sparse
         mapping = {u: i for i, u in enumerate(sorted(self.input_graph.nodes))}
-        n, m = self.input_graph.order(), self.input_graph.size()
+        # n, m = self.input_graph.order(), self.input_graph.size()
 
         # self.A = nx.to_scipy_sparse_array(self.input_graph, dtype='d', weight=1,  # unweighted graphs only
         #                                   nodelist=sorted(self.input_graph.nodes()))
-        self.A = nx.to_numpy_array(self.input_graph, dtype='d', weight=1, nodelist=sorted(self.input_graph.nodes))
+        # self.A = nx.to_numpy_array(self.input_graph, dtype='d', weight=1, nodelist=sorted(self.input_graph.nodes))
+
+        self.A = nx.to_numpy_array(self.input_graph, dtype='d', weight='weight',
+                                   nodelist=sorted(self.input_graph.nodes))
+        for isolated_node in nx.isolates(self.input_graph):
+            self.A[mapping[isolated_node], mapping[isolated_node]] = 1
+
+        n, m = self.A.shape[0], np.sum(self.A) / 2
 
         self.d = self.A @ np.ones((n, 1))  # n x 1 degree vector
         self.D = np.diag(self.d.flatten())
@@ -496,11 +511,18 @@ class MultiLouvainClustering(MarkovClustering):
     def _init_matrices(self):
         # numpy is a lot faster than scipy sparse
         mapping = {u: i for i, u in enumerate(sorted(self.input_graph.nodes))}
-        n, m = self.input_graph.order(), self.input_graph.size()
+        # n, m = self.input_graph.order(), self.input_graph.size()
 
         # self.A = nx.to_scipy_sparse_array(self.input_graph, dtype='d', weight=1,  # unweighted graphs only
         #                                   nodelist=sorted(self.input_graph.nodes()))
-        self.A = nx.to_numpy_array(self.input_graph, dtype='d', weight=1, nodelist=sorted(self.input_graph.nodes))
+        # self.A = nx.to_numpy_array(self.input_graph, dtype='d', weight=1, nodelist=sorted(self.input_graph.nodes))
+
+        self.A = nx.to_numpy_array(self.input_graph, dtype='d', weight='weight',
+                                   nodelist=sorted(self.input_graph.nodes))
+        for isolated_node in nx.isolates(self.input_graph):
+            self.A[mapping[isolated_node], mapping[isolated_node]] = 1
+
+        n, m = self.A.shape[0], np.sum(self.A) / 2
 
         self.d = self.A @ np.ones((n, 1))  # n x 1 degree vector
         self.D = np.diag(self.d.flatten())
@@ -573,10 +595,10 @@ if __name__ == '__main__':
     # TODO: get description length from infomap object
 
     paths = Paths(basedir='../')
-    avg_k = 15
-    mu = 0.1
-    lfr = LFRGraph(paths=paths, n=1000, mu=mu, avg_k=avg_k)
-    g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=1)
+    # avg_k = 15
+    # mu = 0.1
+    # lfr = LFRGraph(paths=paths, n=1000, mu=mu, avg_k=avg_k)
+    # g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=1)
 
     # g, g.name = nx.barbell_graph(4, 5), 'barbell'
     # ground_truth_clustering = NodeClustering(communities=[[0, 1, 2, 3], [4, 5, 6, 7, 8], [9, 10, 11, 12]], graph=g)
@@ -587,29 +609,31 @@ if __name__ == '__main__':
     # other_clustering.run(num_trials=1, overwrite=True)
     #
     # cdlib.algorithms.greedy_modularity()
-    sizes = [30, 30, 30]
-    probs = [
-        [0.35, 0.05, 0.05],
-        [0.05, 0.35, 0.10],
-        [0.05, 0.10, 0.35]
-    ]
+    # sizes = [30, 30, 30]
+    # probs = [
+    #     [0.35, 0.05, 0.05],
+    #     [0.05, 0.35, 0.10],
+    #     [0.05, 0.10, 0.35]
+    # ]
 
-    g = nx.stochastic_block_model(sizes, probs, seed=1)
-    ground_truth_clustering = NodeClustering(nx.community.louvain_communities(g), graph=g)
+    # g = nx.stochastic_block_model(sizes, probs, seed=1)
+    # ground_truth_clustering = NodeClustering(nx.community.louvain_communities(g), graph=g)
 
     # g = nx.ring_of_cliques(51, clique_size=4)
-    # g, g.name = nx.barbell_graph(4, 5), 'barbell'
-    # ground_truth_clustering = NodeClustering(communities=[[0, 1, 2, 3], [4, 5, 6, 7, 8], [9, 10, 11, 12]], graph=g)
+    g, g.name = nx.barbell_graph(4, 5), 'barbell'
+
+    ground_truth_clustering = NodeClustering(communities=[[0, 1, 2, 3], [4, 5, 6, 7, 8], [9, 10, 11, 12]], graph=g)
 
     # louvain_comms = nx.community.louvain_communities(g)
 
-    # method = 'RW'
-    # er_null_model = False
-    # corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=True, method=method,
-    #                                      ground_truth_clustering=ground_truth_clustering, erdos_renyi_null=er_null_model)
-    #
-    # clusterings, best_clusterings = corr_cluster.run(num_trials=5, write_stats=False, overwrite=True)
-    # clusterings
+    method = 'RW'
+    er_null_model = False
+    corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=True, method=method,
+                                         ground_truth_clustering=ground_truth_clustering,
+                                         erdos_renyi_null=er_null_model)
+
+    clusterings, best_clusterings = corr_cluster.run(num_trials=5, write_stats=False, overwrite=True)
+    clusterings
 
     # method = 'RW'
     # markov_cluster = MarkovClustering(paths=paths, input_graph=g, continuous=True, method=method,
@@ -617,7 +641,7 @@ if __name__ == '__main__':
     # clusterings, best_clusterings = markov_cluster.run(num_trials=5, overwrite=True)
     # clusterings
 
-    louvain_cluster = MultiLouvainClustering(paths=paths, input_graph=g,
-                                             ground_truth_clustering=ground_truth_clustering)
-    clusterings, best_clusterings = louvain_cluster.run(num_trials=5, overwrite=True)
-    best_clusterings
+    # louvain_cluster = MultiLouvainClustering(paths=paths, input_graph=g,
+    #                                          ground_truth_clustering=ground_truth_clustering)
+    # clusterings, best_clusterings = louvain_cluster.run(num_trials=5, overwrite=True)
+    # best_clusterings

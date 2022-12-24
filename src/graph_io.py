@@ -2,6 +2,7 @@
 File for general graph io and synthetic graph generation
 """
 import subprocess
+from pathlib import Path
 from typing import Tuple
 
 import networkx as nx
@@ -17,7 +18,7 @@ class LFRGraph:
     Container for LFR graphs - store both the graph object and the node community labels
     """
 
-    def __init__(self, paths: Paths, n: int, mu: float, avg_k: int, max_k: int = 50):
+    def __init__(self, paths: Paths, n: int, mu: float, avg_k: int, max_k: int = 50, family='LFR'):
         """
         n: number of nodes
         mu: mixing parameter
@@ -28,9 +29,12 @@ class LFRGraph:
         self.mu = round(mu, 2)
         self.avg_k = avg_k
         self.max_k = max_k
-        self.name = f'LFR-{self.n // 1000}k-{max_k}-{avg_k}-{int(self.mu * 100)}'
+        self.family = family
+        self.name = f'{family}-{self.n // 1000}k-{max_k}-{avg_k}-{int(self.mu * 100)}'
 
-        self.graph_basepath = self.paths.data_dir / 'LFR' / f'{self.n // 1000}k-{max_k}/{avg_k}'
+        self.graph_basepath = self.paths.data_dir / family / f'{self.n // 1000}k-{max_k}/{avg_k}'
+        # print(f'{self.graph_basepath=}')
+
         # self.input_g = None
         # self.pos = None  # store the node positions
         # self.ground_truth_clustering: NodeClustering = self.generate_ground_truth_clustering()
@@ -118,10 +122,15 @@ class LFRGraph:
         tau1, tau2 = 2, 3
         avg_degree = self.avg_k
         max_degree = self.max_k
-        c_min = 10
-        c_max = 100
-        self.graph_basepath.mkdir(exist_ok=True)
 
+        if self.family == 'LFR':
+            c_min, c_max = 10, 100  # hard
+        else:
+            c_min, c_max = 25, 50  # easy
+
+        self.paths.lfr_dir = Path('./LFR')
+        self.graph_basepath.mkdir(exist_ok=True, parents=True)
+        print(f'{self.graph_basepath=}')
         for trial in range(1, num_graphs + 1):
             output_graph = self.graph_basepath / f'{self.name}_{trial}.gml'
             if output_graph.exists() and not overwrite:

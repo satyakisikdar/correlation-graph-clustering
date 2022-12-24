@@ -140,11 +140,12 @@ class CorrelationClustering(BaseClustering):
     main idea: avoid recalculation of objects that don't change - esp matrices
     """
 
-    _METHODS = ['GW', 'RW', 'Diff',
+    _METHODS = ['GW', 'RW', 'Diff', 'RW',
                 'CO', 'MultiLouvain']  # GW=GraphWalk, RW=RandomWalk, Diff=Diffusion, CO=Consensus
 
     def __init__(self, method: str, continuous: bool, paths: Paths, input_graph: nx.Graph,
-                 ground_truth_clustering: NodeClustering, erdos_renyi_null: bool = False, family: str = 'LFR'):
+                 ground_truth_clustering: NodeClustering, erdos_renyi_null: bool = False,
+                 family: str = 'LFR', inertia_factor: int = 0):
 
         super().__init__(paths=paths, input_graph=input_graph, ground_truth_clustering=ground_truth_clustering,
                          method=method, family=family)
@@ -153,8 +154,9 @@ class CorrelationClustering(BaseClustering):
         self.erdos_renyi_null = erdos_renyi_null
         assert isinstance(continuous, bool)
         self.is_continuous = continuous  # true if continuous
-        self.mapping = self._init_matrices()
+        self.inertia_factor = inertia_factor  # factor of things to diagonal
         self.full_leakage_score = None
+        self.mapping = self._init_matrices()
         return
 
     def generate_taus(self):
@@ -184,10 +186,22 @@ class CorrelationClustering(BaseClustering):
         self.A = nx.to_numpy_array(self.input_graph, dtype='d', weight='weight',
                                    nodelist=sorted(self.input_graph.nodes))
 
+        n = self.A.shape[0]
+
         for isolated_node in nx.isolates(self.input_graph):
             self.A[mapping[isolated_node], mapping[isolated_node]] = 1
 
-        n, m = self.A.shape[0], np.sum(self.A) / 2
+        if self.inertia_factor != 0:  # adjust the A matrix
+            if self.method == 'Diff':
+                self.A = self.A + (self.inertia_factor * np.eye(n, n))
+            elif self.method == 'RW':
+                d = self.A @ np.ones((n, 1))
+                D = np.diag(d.flatten())
+                self.A = self.A + (self.inertia_factor * D)
+            elif self.method == 'CO':
+                raise NotImplementedError(f'Undefined for {self.method}!')
+
+        m = np.sum(self.A) / 2 + np.sum(np.diag(self.A)) / 2  # diagonals otherwise get counted 1/2 as much
 
         self.d = self.A @ np.ones((n, 1))  # n x 1 degree vector
         self.D = np.diag(self.d.flatten())
@@ -331,8 +345,13 @@ class CorrelationClustering(BaseClustering):
             else:
                 method = method_
 
+            if self.inertia_factor != 0 and self.__class__.__name__ == 'CorrelationClustering':
+                method_ = f'{method_}-{self.inertia_factor}'
+
             if self.erdos_renyi_null:
                 method = f'{method_}-ER'
+            else:
+                method = method_
 
             mu = self.input_graph.graph.get('mu', np.nan)
             self.input_graph.graph.get('avg_k', np.nan)
@@ -615,24 +634,25 @@ if __name__ == '__main__':
     #     [0.05, 0.35, 0.10],
     #     [0.05, 0.10, 0.35]
     # ]
-
+    #
     # g = nx.stochastic_block_model(sizes, probs, seed=1)
     # ground_truth_clustering = NodeClustering(nx.community.louvain_communities(g), graph=g)
 
-    # g = nx.ring_of_cliques(51, clique_size=4)
-    g, g.name = nx.barbell_graph(4, 5), 'barbell'
+    g, g.name = nx.ring_of_cliques(51, clique_size=4), 'clique-ring-51'
+    # g, g.name = nx.barbell_graph(4, 5), 'barbell'
+    #
+    # ground_truth_clustering = NodeClustering(communities=[[0, 1, 2, 3], [4, 5, 6, 7, 8], [9, 10, 11, 12]], graph=g)
 
-    ground_truth_clustering = NodeClustering(communities=[[0, 1, 2, 3], [4, 5, 6, 7, 8], [9, 10, 11, 12]], graph=g)
-
-    # louvain_comms = nx.community.louvain_communities(g)
+    louvain_comms = NodeClustering(nx.community.louvain_communities(g), graph=g)
 
     method = 'RW'
+    inertia_factor = 2
     er_null_model = False
     corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=True, method=method,
-                                         ground_truth_clustering=ground_truth_clustering,
+                                         ground_truth_clustering=louvain_comms, inertia_factor=inertia_factor,
                                          erdos_renyi_null=er_null_model)
 
-    clusterings, best_clusterings = corr_cluster.run(num_trials=5, write_stats=False, overwrite=True)
+    clusterings, best_clusterings = corr_cluster.run(num_trials=5, write_stats=True, overwrite=True)
     clusterings
 
     # method = 'RW'

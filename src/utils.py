@@ -1,6 +1,7 @@
 """
 General utilities file
 """
+import multiprocessing
 import os
 import platform
 import warnings
@@ -8,13 +9,13 @@ from multiprocessing import Pool
 from pathlib import Path
 from typing import Union
 
+import clusim.sim as sim
 import matplotlib
 import networkx as nx
 import numpy as np
 from cdlib import NodeClustering
 from cdlib.utils import convert_graph_formats
 from cdlib.viz.networks import __filter, COLOR
-from clusim.clusimelement import element_sim
 from clusim.clustering import Clustering
 from matplotlib import pyplot as plt
 
@@ -38,10 +39,32 @@ def clusim_ec_score(clustering_1: NodeClustering, clustering_2: NodeClustering):
     """
     Use the Clusim package to calculate EC score
     """
-    clu_dict1 = {i: clusters for i, clusters in enumerate(clustering_1.communities)}
-    clu_dict2 = {i: clusters for i, clusters in enumerate(clustering_2.communities)}
+    return clusim_similarity_score(clustering_1=clustering_1, clustering_2=clustering_2, metric='EC')
 
-    return element_sim(Clustering(clu2elm_dict=clu_dict1), Clustering(clu2elm_dict=clu_dict2))
+
+def clusim_similarity_score(clustering_1: NodeClustering, clustering_2: NodeClustering, metric: str):
+    if isinstance(clustering_1, NodeClustering) and isinstance(clustering_2, NodeClustering):
+        clu_dict1 = {i: clusters for i, clusters in enumerate(clustering_1.communities)}
+        clu_dict2 = {i: clusters for i, clusters in enumerate(clustering_2.communities)}
+        clu1, clu2 = Clustering(clu2elm_dict=clu_dict1), Clustering(clu2elm_dict=clu_dict2)
+
+    elif isinstance(clustering_1, dict) and isinstance(clustering_2, dict):
+        elm2dict_1 = {k: [v] for k, v in clustering_1.items()}
+        elm2dict_2 = {k: [v] for k, v in clustering_2.items()}
+        clu1, clu2 = Clustering(elm2clu_dict=elm2dict_1), Clustering(elm2clu_dict=elm2dict_2)
+
+    metric = metric.upper()
+
+    if metric == 'EC':
+        fn = sim.element_sim
+    elif metric == 'NMI':
+        fn = sim.nmi
+    elif metric == 'AMI':
+        fn = sim.adj_mi
+    else:
+        raise NotImplementedError()
+
+    return fn(clu1, clu2)
 
 
 def parallel_async(func, args, num_workers=10, timeout=None):
@@ -58,13 +81,13 @@ def parallel_async(func, args, num_workers=10, timeout=None):
             try:
                 r.wait(timeout=timeout)
                 results.append(r.get(timeout=timeout))
-            except TimeoutError:
-                print(f'Timeout after {timeout}s')
+            except (TimeoutError, multiprocessing.context.TimeoutError) as e:
+                print(f'Timeout after {timeout}s {e=}')
             except Exception as e:
                 try:
                     results.append(r.get(timeout=timeout))
-                except TimeoutError:
-                    print(f'Timeout after {timeout}s')
+                except (TimeoutError, multiprocessing.context.TimeoutError) as e:
+                    print(f'Timeout after {timeout}s {e=}')
 
     return results
 
@@ -89,30 +112,9 @@ def plot_network_clusters(
         cmap: object = 'tab20',
         top_k: int = None,
         min_size: int = None,
+        plot_edges: bool = True,
+        alpha: float = 0.5,
 ) -> object:
-    """
-    Plot a graph with node color coding for communities.
-
-    :param graph: NetworkX/igraph graph
-    :param partition: NodeClustering object
-    :param position: A dictionary with nodes as keys and positions as values. Example: networkx.fruchterman_reingold_layout(G). By default, uses nx.spring_layout(g)
-    :param figsize: the figure size; it is a pair of float, default (8, 8)
-    :param node_size: int, default 200
-    :param plot_overlaps: bool, default False. Flag to control if multiple algorithms memberships are plotted.
-    :param plot_labels: bool, default False. Flag to control if node labels are plotted.
-    :param cmap: str or Matplotlib colormap, Colormap(Matplotlib colormap) for mapping intensities of nodes. If set to None, original colormap is used.
-    :param top_k: int, Show the top K influential communities. If set to zero or negative value indicates all.
-    :param min_size: int, Exclude communities below the specified minimum size.
-
-    Example:
-
-    >>> from cdlib import algorithms, viz
-    >>> import networkx as nx
-    >>> g = nx.karate_club_graph()
-    >>> coms = algorithms.louvain(g)
-    >>> pos = nx.spring_layout(g)
-    >>> viz.plot_network_clusters(g, coms, pos)
-    """
     if not isinstance(cmap, (type(None), str, matplotlib.colors.Colormap)):
         raise TypeError(
             "The 'cmap' argument must be NoneType, str or matplotlib.colors.Colormap, "
@@ -123,6 +125,8 @@ def plot_network_clusters(
         fig, ax = plt.subplots(figsize=figsize, layout='tight')
 
     # ax.axis('off')
+    if partition.method_parameters is None:
+        partition.method_parameters = {}
 
     if title is None:
         modularity = partition.newman_girvan_modularity().score
@@ -160,7 +164,8 @@ def plot_network_clusters(
         cmap = matplotlib.colors.ListedColormap(COLOR[:n_communities])
     else:
         cmap = plt.cm.get_cmap(cmap, n_communities)
-    _norm = matplotlib.colors.Normalize(vmin=0, vmax=n_communities - 1)
+    # _norm = matplotlib.colors.Normalize(vmin=0, vmax=n_communities - 1)
+    _norm = lambda x: x
     fontcolors = list(
         map(
             lambda rgb: ".15" if np.dot(rgb, [0.2126, 0.7152, 0.0722]) > 0.408 else "w",
@@ -186,11 +191,13 @@ def plot_network_clusters(
             cluster_labels[u] = i
 
     # draw intra comm edges first
+
     intra_comm_edges = {(u, v) for u, v in graph.edges() if cluster_labels[u] == cluster_labels[v]}
     inter_comm_edges = set(graph.edges()) - intra_comm_edges
 
-    nx.draw_networkx_edges(graph, position, alpha=0.5, edgelist=inter_comm_edges, edge_color='gray', ax=ax)
-    nx.draw_networkx_edges(graph, position, alpha=0.6, edgelist=intra_comm_edges, edge_color='black', ax=ax)
+    if plot_edges:
+        nx.draw_networkx_edges(graph, position, alpha=alpha, edgelist=inter_comm_edges, edge_color='gray', ax=ax)
+        nx.draw_networkx_edges(graph, position, alpha=alpha + 0.1, edgelist=intra_comm_edges, edge_color='black', ax=ax)
 
     if plot_labels:
         nx.draw_networkx_labels(
@@ -228,7 +235,8 @@ def plot_network_clusters(
                     ax=ax,
                     labels={node: str(node) for node in partition[i]},
                 )
-
+    ax.set_xlim([1.1 * x for x in ax.get_xlim()])
+    ax.set_ylim([1.1 * y for y in ax.get_ylim()])
     return ax
 
 

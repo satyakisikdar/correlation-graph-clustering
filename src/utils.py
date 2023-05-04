@@ -28,7 +28,7 @@ class Paths:
             self.basedir: Path = Path('/N/slate/ssikdar/data-dump/corr-cluster')
 
         self.data_dir: Path = self.basedir / 'input'
-        self.results_dir: Path = self.basedir / 'results_new_4'
+        self.results_dir: Path = self.basedir / 'results_may-2023'
         self.lfr_dir: Path = self.basedir / 'LFR'
 
         self.results_dir.mkdir(parents=True, exist_ok=True)
@@ -61,8 +61,10 @@ def clusim_similarity_score(clustering_1: NodeClustering, clustering_2: NodeClus
         fn = sim.nmi
     elif metric == 'AMI':
         fn = sim.adj_mi
+    elif metric.lower() == 'purity_index':
+        fn = sim.purity_index
     else:
-        raise NotImplementedError()
+        raise NotImplementedError(f'{metric=}')
 
     return fn(clu1, clu2)
 

@@ -9,6 +9,7 @@ import networkx as nx
 from cdlib import NodeClustering
 from cdlib.evaluation import normalized_mutual_information, adjusted_mutual_information
 from matplotlib import pyplot as plt
+from tqdm.auto import tqdm
 
 from src.utils import remove_files, plot_network_clusters, Paths
 
@@ -156,3 +157,96 @@ class LFRGraph:
             remove_files([generated_graph_path, generated_cluster_path, self.paths.lfr_dir / 'statistics.dat',
                           self.paths.lfr_dir / 'time_seed.dat'])
         return
+
+
+def generate_lfr_like_sbm(n, cluster_size, mu, avg_k):
+    n_c = cluster_size
+    alpha = (mu / (1 - mu)) * (n_c / (n - n_c))
+    p_in = avg_k / (n_c * (1 - alpha) + alpha * n)
+    p_out = alpha * p_in
+
+    num_blocks = n // cluster_size
+    sizes = [cluster_size] * num_blocks
+
+    # mu = p_out / (p_out + p_in)
+    G = nx.random_partition_graph(sizes=sizes, p_in=p_in, p_out=p_out)
+    G.name = f'SBM-{n}-{avg_k}-{cluster_size}-{mu}'
+    ground_truth_comm_labels = nx.get_node_attributes(G, name='block')
+    # ground_truth_clustering = NodeClustering(dict_to_list_of_lists(ground_truth_comm_labels), graph=G)
+
+    return G, ground_truth_comm_labels
+
+
+class SBMGraph:
+    """
+    Container for SBM graphs
+    """
+
+    def __init__(self, paths: Paths, n: int, mu: float, avg_k: int, cluster_size: int = 50, family='sbm'):
+        """
+        n: number of nodes
+        mu: mixing parameter
+        avg_k: average degree
+        """
+        self.paths = paths
+        self.n = n
+        self.mu = round(mu, 2)
+        self.avg_k = avg_k
+        self.cluster_size = cluster_size
+        self.family = family
+        self.name = f'{family}-{self.n // 1000}k-{cluster_size}-{avg_k}-{int(self.mu * 100)}'
+
+        self.graph_basepath = self.paths.data_dir / family / f'{self.n // 1000}k-{cluster_size}/{avg_k}'
+        return
+
+    def generate_graphs(self, num_graphs: int, overwrite: bool = False):
+        """
+         Generate num_graphs graphs with the same parameters
+        """
+        avg_degree = self.avg_k
+
+        self.graph_basepath.mkdir(exist_ok=True, parents=True)
+        # print(f'{self.graph_basepath=}')
+        for trial in tqdm(range(1, num_graphs + 1)):
+            output_graph = self.graph_basepath / f'{self.name}_{trial}.gml'
+            if output_graph.exists() and not overwrite:
+                size = output_graph.stat().st_size / 1024  # size in KB
+                if size > 100:
+                    continue
+
+            G, ground_truth_comm_labels = generate_lfr_like_sbm(n=self.n, cluster_size=self.cluster_size, mu=self.mu,
+                                                                avg_k=avg_degree)
+            del G.graph['partition']  # delete graph level attribute
+            # nx.set_node_attributes(G, name='ground_truth', values=ground_truth_comm_labels)
+            try:
+                nx.write_gml(G, path=output_graph)
+            except nx.NetworkXError as e:
+                print(e)
+
+        return
+
+    def get_graph_and_clustering(self, trial: int):
+        output_graph_path = self.graph_basepath / f'{self.name}_{trial}.gml'
+        try:
+            sbm_g = nx.read_gml(output_graph_path, destringizer=int)
+        except Exception as e:
+            print(f'{self.mu=} {trial=} {self.avg_k=} {e=}')
+            exit(1)
+
+        # set graph level attributes
+        sbm_g.name = self.name + f'_{trial}'  # add trial number for output
+        sbm_g.graph['mu'] = self.mu
+        sbm_g.graph['avg_k'] = self.avg_k
+        sbm_g.graph['cluster_size'] = self.cluster_size
+
+        ground_truth_labels = nx.get_node_attributes(sbm_g, name='block')
+        clusters_dict = {}  # key: community label, value: list of member nodes
+
+        for u, c_u in ground_truth_labels.items():
+            if c_u not in clusters_dict:
+                clusters_dict[c_u] = []
+            clusters_dict[c_u].append(u)
+
+        clustering = NodeClustering(communities=list(clusters_dict.values()), graph=sbm_g,
+                                    method_name='ground_truth')
+        return sbm_g, clustering

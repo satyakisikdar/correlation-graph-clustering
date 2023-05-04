@@ -12,7 +12,7 @@ import pandas as pd
 sys.path.extend(['./', '../'])
 from src.clustering import CorrelationClustering, OtherClustering, MarkovClustering, MultiLouvainClustering
 from src.utils import Paths, remove_files, parallel_async
-from src.graph_io import LFRGraph
+from src.graph_io import LFRGraph, SBMGraph
 
 
 def generate_LFR(paths: Paths, LFR_source: str = './LFR', n: int = 1000, mu: float = 0.25, overwrite: bool = False):
@@ -70,10 +70,32 @@ def LFR_runner():
     n = 1_000
     mus = np.linspace(0, 1, 21)
     for mu in mus:
-        for avg_k in [15, 20, 25]:
+        for avg_k in [10, 15, 20, 25][: 1]:
             lfr = LFRGraph(paths=paths, n=n, mu=mu, avg_k=avg_k)
             lfr.generate_graphs(num_graphs=10, overwrite=False)
         # break
+    return
+
+
+def sbm_graph_runner(mus):
+    """
+    SBM graph generator
+    """
+    paths = Paths(basedir='./')
+    n = 1_000
+    avg_ks = [5, 10, 15, 20, 25]
+    for mu in mus:
+        for avg_k in avg_ks:
+            sbm = SBMGraph(paths=paths, n=n, mu=mu, avg_k=avg_k)
+            sbm.generate_graphs(num_graphs=10, overwrite=False)
+
+    # test
+    # mu = 0.1
+    # avg_k = 10
+    # sbm = SBMGraph(paths=paths, n=n, mu=mu, avg_k=avg_k)
+    # for trial in range(1, 11):
+    #     g, clustering = sbm.get_graph_and_clustering(trial=trial)
+    #     assert g.graph['avg_k'] == avg_k and g.graph['mu'] == mu
     return
 
 
@@ -111,9 +133,16 @@ def other_methods():
 
 def corr_cluster_runner(mu, avg_k, trial, method, continuous, erdos_renyi_null_model=False, family='LFR', inertia=0):
     paths = Paths(basedir='./')
-    lfr = LFRGraph(mu=mu, paths=paths, n=1000, avg_k=avg_k, family=family)
 
-    input_g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=trial)
+    if family in ('LFR', 'LFR-easy'):
+        lfr = LFRGraph(mu=mu, paths=paths, n=1000, avg_k=avg_k, family=family)
+        input_g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=trial)
+    elif family == 'sbm':
+        sbm = SBMGraph(mu=mu, paths=paths, n=1000, avg_k=avg_k, family=family)
+        input_g, ground_truth_clustering = sbm.get_graph_and_clustering(trial=trial)
+    else:
+        raise NotImplementedError(f'{family=}')
+
     clustering_method = CorrelationClustering(input_graph=input_g, family=family, inertia_factor=inertia,
                                               ground_truth_clustering=ground_truth_clustering,
                                               method=method, continuous=continuous, paths=paths,
@@ -122,19 +151,27 @@ def corr_cluster_runner(mu, avg_k, trial, method, continuous, erdos_renyi_null_m
     return
 
 
-def corr_cluster(mus=np.linspace(0, 1, 21), family='LFR', inertia_range=range(1, 4)):
-    num_workers = 15
+def corr_cluster(mus=np.linspace(0, 1, 21), family='LFR', inertia_range=[0]):
+    # inertia_range = np.arange(0.5, 5.5, 0.5)
+    num_workers = 10
     args = []
+    print(f'{mus=} {inertia_range=}')
+    num_trials = 20
+    if family in ('LFR-easy', 'sbm'):
+        num_trials = 10
 
-    num_trials = 10 if family == 'LFR-easy' else 20
-
-    methods = ['GW', 'RW', 'Diff', 'CO'][1:]
+    # methods = ['GW', 'RW', 'Diff', 'CO']
+    methods = ['RW']
     continuous = True
 
     for inertia in inertia_range:
-        for erdos_renyi_null_model in [False, True]:
+        for erdos_renyi_null_model in [False, True][: 1]:
             for mu in mus:  # 21
-                for avg_k in (15, 20, 25):  # 3
+                for avg_k in (5, 10, 15, 20, 25)[: 4]:  # 3
+                    if family == 'LFR' and avg_k == 5:
+                        continue
+                    if avg_k == 10:
+                        num_trials = 10
                     for trial in range(1, num_trials + 1):  # 20
                         for method in methods:  # 3
                             if inertia > 0 and method == 'CO':  # no inertia for CO yet
@@ -149,9 +186,15 @@ def corr_cluster(mus=np.linspace(0, 1, 21), family='LFR', inertia_range=range(1,
 
 def markov_cluster_runner(mu, avg_k, trial, method, continuous, family):
     paths = Paths(basedir='./')
-    lfr = LFRGraph(mu=mu, paths=paths, n=1000, avg_k=avg_k)
+    if family in ('LFR', 'LFR-easy'):
+        lfr = LFRGraph(mu=mu, paths=paths, n=1000, avg_k=avg_k, family=family)
+        input_g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=trial)
+    elif family == 'sbm':
+        sbm = SBMGraph(mu=mu, paths=paths, n=1000, avg_k=avg_k, family=family)
+        input_g, ground_truth_clustering = sbm.get_graph_and_clustering(trial=trial)
+    else:
+        raise NotImplementedError(f'{family=}')
 
-    input_g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=trial)
     clustering_method = MarkovClustering(input_graph=input_g, family=family,
                                          ground_truth_clustering=ground_truth_clustering,
                                          method=method, continuous=continuous, paths=paths)
@@ -161,15 +204,20 @@ def markov_cluster_runner(mu, avg_k, trial, method, continuous, family):
 
 def markov_cluster(mus=np.linspace(0, 1, 21), family='LFR'):
     print(f'Markov {mus=}')
-    num_workers = 8
+    num_workers = 5
     args = []
     # mus = np.linspace(0, 1, 21)
     continuous = True
-    methods = ['RW', 'Diff']  # [1:]
-    num_trials = 10 if family == 'LFR-easy' else 20
+    methods = ['RW', 'Diff'][: 1]  # [1:]
+    if family in ('LFR-easy', 'sbm'):
+        num_trials = 10
+    else:
+        num_trials = 20
 
     for mu in mus:  # 21
-        for avg_k in (15, 20, 25):  # 3
+        for avg_k in (5, 10, 15, 20, 25):  # 3
+            if avg_k == 10:
+                num_trials = 10
             for trial in range(1, num_trials + 1):  # 20
                 for method in methods:  # 3
                     args.append((mu, avg_k, trial, method, continuous, family))  # 10
@@ -181,9 +229,15 @@ def markov_cluster(mus=np.linspace(0, 1, 21), family='LFR'):
 
 def multilouvain_cluster_runner(mu, avg_k, trial, family):
     paths = Paths(basedir='./')
-    lfr = LFRGraph(mu=mu, paths=paths, n=1000, avg_k=avg_k)
+    if family in ('LFR', 'LFR-easy'):
+        lfr = LFRGraph(mu=mu, paths=paths, n=1000, avg_k=avg_k, family=family)
+        input_g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=trial)
+    elif family == 'sbm':
+        sbm = SBMGraph(mu=mu, paths=paths, n=1000, avg_k=avg_k, family=family)
+        input_g, ground_truth_clustering = sbm.get_graph_and_clustering(trial=trial)
+    else:
+        raise NotImplementedError(f'{family=}')
 
-    input_g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=trial)
     clustering_method = MultiLouvainClustering(input_graph=input_g, family=family,
                                                ground_truth_clustering=ground_truth_clustering,
                                                paths=paths)
@@ -198,10 +252,16 @@ def multilouvain(mus=np.linspace(0, 1, 21), family='LFR'):
     args = []
     # mus = np.linspace(0, 1, 21)
     continuous = True
-    num_trials = 10 if family == 'LFR-easy' else 20
+
+    if family in ('LFR-easy', 'sbm'):
+        num_trials = 10
+    else:
+        num_trials = 20
 
     for mu in mus:  # 21
-        for avg_k in (15, 20, 25):  # 3
+        for avg_k in (5, 10, 15, 20, 25)[: -1]:  # 3
+            if avg_k == 10:
+                num_trials = 10
             for trial in range(1, num_trials + 1):  # 20
                 args.append((mu, avg_k, trial, family))  # 10
 
@@ -287,15 +347,20 @@ def lfr_level_stats(mus, family='LFR', overwrite=False):
 
 
 if __name__ == '__main__':
-    print('hello')
-    mus = np.linspace(0, 1, 21)
+    print('Inertia experiments')
+    # mus = np.linspace(0, 1, 21)
+    family = 'LFR'
+    mus = [0.05, 0.1, 0.2, 0.4, 0.6]
+    inertia_values = list(np.geomspace(1, 500, 10).round(2)) + [750, 1000, 2000, 5000]
+    corr_cluster(mus=mus, inertia_range=inertia_values, family=family)
+    # sbm_graph_runner(mus)
 
     # lfr_level_stats(mus=mus)
-
-    corr_cluster(mus=mus, family='LFR')
     # other_methods()
-    # markov_cluster(family='LFR', mus=mus[: 5])
-    # multilouvain(family='LFR-easy')
+
+    # corr_cluster(mus=mus, family=family)
+    # markov_cluster(family=family, mus=mus)
+    # multilouvain(family=family, mus=mus)
 
     # corr_cluster_runner(mu=0.1, avg_k=15, trial=1, method='GW', continuous=True, exact=True)
     #

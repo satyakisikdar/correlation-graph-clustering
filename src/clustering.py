@@ -166,7 +166,9 @@ class CorrelationClustering(BaseClustering):
         # taus_1 = np.geomspace(np.finfo(float).eps, self.tau_max, num=5)
         # taus_2 = np.geomspace(self.tau_max, self.tau_diff, num=5)[1:]  # prevent tau_max from getting double counted
 
-        taus_1 = np.linspace(np.finfo(float).eps, self.tau_max, num=5)
+        # taus_1 = np.linspace(np.finfo(float).eps, self.tau_max, num=5)
+        taus_1 = np.linspace(np.finfo(float).eps, self.tau_max, num=10)  # twice as granular
+
         # taus_2 = np.linspace(self.tau_max, self.tau_diff, num=10)[1:]  # prevent tau_max from getting double counted
         taus_2 = np.geomspace(self.tau_max, self.tau_diff, num=10)[1:]  # prevent tau_max from getting double counted
 
@@ -193,7 +195,10 @@ class CorrelationClustering(BaseClustering):
 
         if self.inertia_factor != 0:  # adjust the A matrix
             if self.method == 'Diff':
-                self.A = self.A + (self.inertia_factor * np.eye(n, n))
+                # self.A = self.A + (self.inertia_factor * np.eye(n, n))
+                d = self.A @ np.ones((n, 1))
+                D = np.diag(d.flatten())
+                self.A = self.A + (self.inertia_factor * D)
             elif self.method == 'RW':
                 d = self.A @ np.ones((n, 1))
                 D = np.diag(d.flatten())
@@ -332,6 +337,9 @@ class CorrelationClustering(BaseClustering):
         best_clusterings = {}  # store the best clustering for each tau
 
         G_ = nx.relabel_nodes(self.input_graph, mapping=self.mapping)
+        # if self.__class__.__name__ == 'CorrelationClustering' and self.inertia_factor != 0:
+        #     taus = [0]
+
         for tau_ix, tau in enumerate(taus):
             R = self.generate_R_matrix(tau=tau)
 
@@ -345,17 +353,20 @@ class CorrelationClustering(BaseClustering):
             else:
                 method = method_
 
-            if self.inertia_factor != 0 and self.__class__.__name__ == 'CorrelationClustering':
-                method_ = f'{method_}-{self.inertia_factor}'
+            if self.__class__.__name__ == 'CorrelationClustering':
+                if self.inertia_factor != 0:
+                    method_ = f'{method_}-{self.inertia_factor}'
+                    if self.method == 'Diff':
+                        method_ = f'{method_}-new'  # for newly adjusted inertia
 
-            if self.erdos_renyi_null:
-                method = f'{method_}-ER'
-            else:
-                method = method_
+                if self.erdos_renyi_null:
+                    method = f'{method_}-ER'
+                else:
+                    method = method_
 
             mu = self.input_graph.graph.get('mu', np.nan)
             self.input_graph.graph.get('avg_k', np.nan)
-            desc = f'{self.__class__.__name__} {method} {mu=} {tau_ix=} ..'
+            desc = f'{self.__class__.__name__[: 5]} {method} {mu=} {tau_ix=} ..'
             best_clustering = None
             best_score = None
 
@@ -628,31 +639,31 @@ if __name__ == '__main__':
     # other_clustering.run(num_trials=1, overwrite=True)
     #
     # cdlib.algorithms.greedy_modularity()
-    # sizes = [30, 30, 30]
-    # probs = [
-    #     [0.35, 0.05, 0.05],
-    #     [0.05, 0.35, 0.10],
-    #     [0.05, 0.10, 0.35]
-    # ]
-    #
-    # g = nx.stochastic_block_model(sizes, probs, seed=1)
-    # ground_truth_clustering = NodeClustering(nx.community.louvain_communities(g), graph=g)
+    sizes = [30, 30, 30]
+    probs = [
+        [0.35, 0.05, 0.05],
+        [0.05, 0.35, 0.05],
+        [0.05, 0.05, 0.35]
+    ]
 
-    g, g.name = nx.ring_of_cliques(51, clique_size=4), 'clique-ring-51'
+    g = nx.stochastic_block_model(sizes, probs, seed=1)
+    ground_truth_clustering = NodeClustering(nx.community.louvain_communities(g), graph=g)
+
+    # g, g.name = nx.ring_of_cliques(51, clique_size=4), 'clique-ring-51'
     # g, g.name = nx.barbell_graph(4, 5), 'barbell'
     #
     # ground_truth_clustering = NodeClustering(communities=[[0, 1, 2, 3], [4, 5, 6, 7, 8], [9, 10, 11, 12]], graph=g)
 
-    louvain_comms = NodeClustering(nx.community.louvain_communities(g), graph=g)
+    # ground_truth_clustering = NodeClustering(nx.community.louvain_communities(g), graph=g)
 
     method = 'RW'
-    inertia_factor = 2
+    inertia_factor = 0
     er_null_model = False
     corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=True, method=method,
-                                         ground_truth_clustering=louvain_comms, inertia_factor=inertia_factor,
+                                         ground_truth_clustering=ground_truth_clustering, inertia_factor=inertia_factor,
                                          erdos_renyi_null=er_null_model)
-
-    clusterings, best_clusterings = corr_cluster.run(num_trials=5, write_stats=True, overwrite=True)
+    #
+    clusterings, best_clusterings = corr_cluster.run(num_trials=1, write_stats=True, overwrite=True)
     clusterings
 
     # method = 'RW'

@@ -145,7 +145,7 @@ class CorrelationClustering(BaseClustering):
 
     def __init__(self, method: str, continuous: bool, paths: Paths, input_graph: nx.Graph,
                  ground_truth_clustering: NodeClustering, erdos_renyi_null: bool = False,
-                 family: str = 'LFR', inertia_factor: int = 0):
+                 family: str = 'LFR', inertia_factor: int = 0, inertia_type: str = 'v1'):
 
         super().__init__(paths=paths, input_graph=input_graph, ground_truth_clustering=ground_truth_clustering,
                          method=method, family=family)
@@ -155,8 +155,10 @@ class CorrelationClustering(BaseClustering):
         assert isinstance(continuous, bool)
         self.is_continuous = continuous  # true if continuous
         self.inertia_factor = inertia_factor  # factor of things to diagonal
+        self.inertia_type = inertia_type
         self.full_leakage_score = None
         self.mapping = self._init_matrices()
+
         return
 
     def generate_taus(self):
@@ -200,9 +202,12 @@ class CorrelationClustering(BaseClustering):
                 D = np.diag(d.flatten())
                 self.A = self.A + (self.inertia_factor * D)
             elif self.method == 'RW':
-                d = self.A @ np.ones((n, 1))
-                D = np.diag(d.flatten())
-                self.A = self.A + (self.inertia_factor * D)
+                if self.inertia_type == 'v1':
+                    d = self.A @ np.ones((n, 1))
+                    D = np.diag(d.flatten())
+                    self.A = self.A + (self.inertia_factor * D)
+                elif self.inertia_type == 'v2':
+                    self.A = self.A + (self.inertia_factor * np.eye(n, n))
             elif self.method == 'CO':
                 raise NotImplementedError(f'Undefined for {self.method}!')
 
@@ -355,7 +360,10 @@ class CorrelationClustering(BaseClustering):
 
             if self.__class__.__name__ == 'CorrelationClustering':
                 if self.inertia_factor != 0:
-                    method_ = f'{method_}-{self.inertia_factor}'
+                    if self.inertia_type == 'v2':
+                        method_ = f'{method_}-{self.inertia_factor}-v2'
+                    else:
+                        method_ = f'{method_}-{self.inertia_factor}'
                     if self.method == 'Diff':
                         method_ = f'{method_}-new'  # for newly adjusted inertia
 
@@ -657,12 +665,12 @@ if __name__ == '__main__':
     # ground_truth_clustering = NodeClustering(nx.community.louvain_communities(g), graph=g)
 
     method = 'RW'
-    inertia_factor = 0
+    inertia_factor = 0.5
     er_null_model = False
     corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=True, method=method,
                                          ground_truth_clustering=ground_truth_clustering, inertia_factor=inertia_factor,
-                                         erdos_renyi_null=er_null_model)
-    #
+                                         erdos_renyi_null=er_null_model, inertia_type='v1')
+
     clusterings, best_clusterings = corr_cluster.run(num_trials=1, write_stats=True, overwrite=True)
     clusterings
 

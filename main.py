@@ -131,7 +131,8 @@ def other_methods():
     return
 
 
-def corr_cluster_runner(mu, avg_k, trial, method, continuous, erdos_renyi_null_model=False, family='LFR', inertia=0):
+def corr_cluster_runner(mu, avg_k, trial, method, continuous, erdos_renyi_null_model=False, family='LFR', inertia=0,
+                        inertia_type='v1'):
     paths = Paths(basedir='./')
 
     if family in ('LFR', 'LFR-easy'):
@@ -146,12 +147,12 @@ def corr_cluster_runner(mu, avg_k, trial, method, continuous, erdos_renyi_null_m
     clustering_method = CorrelationClustering(input_graph=input_g, family=family, inertia_factor=inertia,
                                               ground_truth_clustering=ground_truth_clustering,
                                               method=method, continuous=continuous, paths=paths,
-                                              erdos_renyi_null=erdos_renyi_null_model)
+                                              erdos_renyi_null=erdos_renyi_null_model, inertia_type=inertia_type)
     clustering_method.run(num_trials=10, overwrite=False)
     return
 
 
-def corr_cluster(mus=np.linspace(0, 1, 21), family='LFR', inertia_range=[0]):
+def corr_cluster(mus=np.linspace(0, 1, 21), family='LFR', inertia_range=[0], inertia_type='v1'):
     # inertia_range = np.arange(0.5, 5.5, 0.5)
     num_workers = 10
     args = []
@@ -177,7 +178,8 @@ def corr_cluster(mus=np.linspace(0, 1, 21), family='LFR', inertia_range=[0]):
                             if inertia > 0 and method == 'CO':  # no inertia for CO yet
                                 continue
                             args.append(
-                                (mu, avg_k, trial, method, continuous, erdos_renyi_null_model, family, inertia))  # 10
+                                (mu, avg_k, trial, method, continuous, erdos_renyi_null_model, family, inertia,
+                                 inertia_type))  # 10
 
     random.shuffle(args)
     parallel_async(func=corr_cluster_runner, args=args, num_workers=num_workers)
@@ -215,7 +217,7 @@ def markov_cluster(mus=np.linspace(0, 1, 21), family='LFR'):
         num_trials = 20
 
     for mu in mus:  # 21
-        for avg_k in (5, 10, 15, 20, 25):  # 3
+        for avg_k in (10, 15, 20):  # 3
             if avg_k == 10:
                 num_trials = 10
             for trial in range(1, num_trials + 1):  # 20
@@ -351,14 +353,16 @@ if __name__ == '__main__':
     # mus = np.linspace(0, 1, 21)
     family = 'LFR'
     mus = [0.05, 0.1, 0.2, 0.4, 0.6]
-    inertia_values = list(np.geomspace(1, 500, 10).round(2)) + [750, 1000, 2000, 5000]
-    corr_cluster(mus=mus, inertia_range=inertia_values, family=family)
+    inertia_values = list(np.arange(1, 6)) + list(np.geomspace(1, 300, 10).round(2)) + [500, 750, 1000, 2000, 5000]
+    inertia_values = sorted(set(inertia_values))  # prevent duplicates
+
+    # corr_cluster(mus=mus, inertia_range=inertia_values, family=family)
     # sbm_graph_runner(mus)
 
     # lfr_level_stats(mus=mus)
     # other_methods()
 
-    # corr_cluster(mus=mus, family=family)
+    corr_cluster(mus=mus, family=family, inertia_type='v2')
     # markov_cluster(family=family, mus=mus)
     # multilouvain(family=family, mus=mus)
 

@@ -19,7 +19,7 @@ class LFRGraph:
     Container for LFR graphs - store both the graph object and the node community labels
     """
 
-    def __init__(self, paths: Paths, n: int, mu: float, avg_k: int, max_k: int = 50, family='LFR'):
+    def __init__(self, paths: Paths, n: int, mu: float, avg_k: int, family='LFR'):
         """
         n: number of nodes
         mu: mixing parameter
@@ -29,6 +29,10 @@ class LFRGraph:
         self.n = n
         self.mu = round(mu, 2)
         self.avg_k = avg_k
+        if n == 1_000:
+            max_k = 50
+        elif n == 10_000:
+            max_k = 500
         self.max_k = max_k
         self.family = family
         self.name = f'{family}-{self.n // 1000}k-{max_k}-{avg_k}-{int(self.mu * 100)}'
@@ -125,7 +129,10 @@ class LFRGraph:
         max_degree = self.max_k
 
         if self.family == 'LFR':
-            c_min, c_max = 10, 100  # hard
+            if self.n == 1000:
+                c_min, c_max = 10, 100  # hard
+            elif self.n == 10_000:
+                c_min, c_max = 100, 1000  # hard
         else:
             c_min, c_max = 25, 50  # easy
 

@@ -1,8 +1,6 @@
 """Main driver"""
 import random
-import subprocess
 import sys
-from pathlib import Path
 
 import graph_tool.all as gt
 import networkx as nx
@@ -11,66 +9,20 @@ import pandas as pd
 
 sys.path.extend(['./', '../'])
 from src.clustering import CorrelationClustering, OtherClustering, MarkovClustering, MultiLouvainClustering
-from src.utils import Paths, remove_files, parallel_async
+from src.utils import Paths, parallel_async
 from src.graph_io import LFRGraph, SBMGraph
 
 
-def generate_LFR(paths: Paths, LFR_source: str = './LFR', n: int = 1000, mu: float = 0.25, overwrite: bool = False):
-    tau1, tau2 = 2, 3
-    avg_degree = 20
-    max_degree = 50 if n == 1000 else 200
-    c_min = 10
-    c_max = 100 if n == 1000 else 1_000
-
-    name = f'LFR-{n}-{int(mu * 100)}'
-    (paths.data_dir / 'LFR').mkdir(exist_ok=True)  # ensure the dir exists
-
-    input_graph_file, output_graph_file = Path('./network.dat'), paths.data_dir / 'LFR' / f'{name}_edgelist.txt'
-    input_cluster_file, output_cluster_file = Path('./community.dat'), paths.data_dir / 'LFR' / f'{name}_clusters.txt'
-
-    if output_graph_file.exists() and output_cluster_file.exists() and not overwrite:
-        print(f'Graph already exists! {str(output_graph_file)}')
-        return
-
-    args = f'./{LFR_source}/benchmark -N {n} -k {avg_degree} -maxk {max_degree} -mu {mu} -t1 {tau1} -t2 {tau2} ' \
-           f'-minc {c_min} -maxc {c_max}'
-    subprocess.run(args=args, shell=True)
-
-    # preprocess the grpah - reindex from 0, adjust cluster labels accordingly
-    g = nx.read_edgelist(input_graph_file, nodetype=int)
-
-    clusters = {}
-    with open(input_cluster_file) as reader:
-        for line in reader:
-            u, c_u = map(int, line.split())
-            clusters[u] = c_u
-    nx.set_node_attributes(g, name='community', values=clusters)
-
-    relabeled_g = nx.convert_node_labels_to_integers(g, first_label=0, ordering='sorted')
-
-    nx.write_edgelist(relabeled_g, output_graph_file, data=False)
-    with open(output_cluster_file, 'w') as writer:
-        clusters = nx.get_node_attributes(relabeled_g, name='community')
-        for u, c_u in sorted(clusters.items()):
-            writer.write(f'{u} {c_u}\n')
-
-    print(f'{output_graph_file=}')
-    # remove the temporary files
-    remove_files([input_graph_file, input_cluster_file, './statistics.dat', './time_seed.dat'])
-    return
-
-
-def LFR_runner():
+def LFR_runner(n: int):
     """
     Generate LFR graphs
     TODO: doesnt run on servers, runs on my computer
     :return:
     """
     paths = Paths(basedir='./')
-    n = 1_000
     mus = np.linspace(0, 1, 21)
     for mu in mus:
-        for avg_k in [10, 15, 20, 25][: 1]:
+        for avg_k in [10, 15, 20]:
             lfr = LFRGraph(paths=paths, n=n, mu=mu, avg_k=avg_k)
             lfr.generate_graphs(num_graphs=10, overwrite=False)
         # break
@@ -132,14 +84,14 @@ def other_methods():
 
 
 def corr_cluster_runner(mu, avg_k, trial, method, continuous, erdos_renyi_null_model=False, family='LFR', inertia=0,
-                        inertia_type='v1'):
+                        inertia_type='v1', n=1000):
     paths = Paths(basedir='./')
 
     if family in ('LFR', 'LFR-easy'):
-        lfr = LFRGraph(mu=mu, paths=paths, n=1000, avg_k=avg_k, family=family)
+        lfr = LFRGraph(mu=mu, paths=paths, n=n, avg_k=avg_k, family=family)
         input_g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=trial)
     elif family == 'sbm':
-        sbm = SBMGraph(mu=mu, paths=paths, n=1000, avg_k=avg_k, family=family)
+        sbm = SBMGraph(mu=mu, paths=paths, n=n, avg_k=avg_k, family=family)
         input_g, ground_truth_clustering = sbm.get_graph_and_clustering(trial=trial)
     else:
         raise NotImplementedError(f'{family=}')
@@ -152,9 +104,10 @@ def corr_cluster_runner(mu, avg_k, trial, method, continuous, erdos_renyi_null_m
     return
 
 
-def corr_cluster(mus=np.linspace(0, 1, 21), family='LFR', inertia_range=[0], inertia_type='v1'):
+def corr_cluster(methods, mus=np.linspace(0, 1, 21), family='LFR', inertia_range=[0], inertia_type='v1',
+                 n=1_000):
     # inertia_range = np.arange(0.5, 5.5, 0.5)
-    num_workers = 10
+    num_workers = 15
     args = []
     print(f'{mus=} {inertia_range=}')
     num_trials = 20
@@ -162,24 +115,26 @@ def corr_cluster(mus=np.linspace(0, 1, 21), family='LFR', inertia_range=[0], ine
         num_trials = 10
 
     # methods = ['GW', 'RW', 'Diff', 'CO']
-    methods = ['RW']
+    # methods = ['RW', 'Diff']
     continuous = True
 
     for inertia in inertia_range:
         for erdos_renyi_null_model in [False, True][: 1]:
             for mu in mus:  # 21
-                for avg_k in (5, 10, 15, 20, 25)[: 4]:  # 3
+                for avg_k in (5, 10, 15, 20, 25):  # 3
                     if family == 'LFR' and avg_k == 5:
                         continue
-                    if avg_k == 10:
+                    if avg_k == 10 or n == 10_000:
                         num_trials = 10
                     for trial in range(1, num_trials + 1):  # 20
                         for method in methods:  # 3
+                            if method != 'RW-C':
+                                inertia_type = 'v1'
                             if inertia > 0 and method == 'CO':  # no inertia for CO yet
                                 continue
                             args.append(
                                 (mu, avg_k, trial, method, continuous, erdos_renyi_null_model, family, inertia,
-                                 inertia_type))  # 10
+                                 inertia_type, n))  # 10
 
     random.shuffle(args)
     parallel_async(func=corr_cluster_runner, args=args, num_workers=num_workers)
@@ -261,7 +216,7 @@ def multilouvain(mus=np.linspace(0, 1, 21), family='LFR'):
         num_trials = 20
 
     for mu in mus:  # 21
-        for avg_k in (5, 10, 15, 20, 25)[: -1]:  # 3
+        for avg_k in (10, 15, 20, 25)[: -1]:  # 3
             if avg_k == 10:
                 num_trials = 10
             for trial in range(1, num_trials + 1):  # 20
@@ -349,48 +304,27 @@ def lfr_level_stats(mus, family='LFR', overwrite=False):
 
 
 if __name__ == '__main__':
+    # LFR_runner(n=10_000)
+
     print('Inertia experiments')
     # mus = np.linspace(0, 1, 21)
     family = 'LFR'
-    mus = [0.05, 0.1, 0.2, 0.4, 0.6]
-    inertia_values = list(np.arange(1, 6)) + list(np.geomspace(1, 300, 10).round(2)) + [500, 750, 1000, 2000, 5000]
+    n = 10_000
+    # family = 'sbm'
+    mus = [0.05, 0.1, 0.2, 0.4, 0.5, 0.6]
+    #
+    inertia_values = list(range(0, 6)) + list(np.geomspace(1, 300, 5).round(2)) + [500, 750, 1000, 2000, 5000]
     inertia_values = sorted(set(inertia_values))  # prevent duplicates
-
-    # corr_cluster(mus=mus, inertia_range=inertia_values, family=family)
+    #
+    # # # inertia_values = [0]  # run the vanilla RW
+    # # inertia_type = 'v1'
+    #
+    corr_cluster(mus=mus, inertia_range=inertia_values, family=family, inertia_type='v2', methods=['Diff', 'RW'],
+                 n=n)
     # sbm_graph_runner(mus)
 
     # lfr_level_stats(mus=mus)
     # other_methods()
 
-    corr_cluster(mus=mus, family=family, inertia_type='v2')
     # markov_cluster(family=family, mus=mus)
     # multilouvain(family=family, mus=mus)
-
-    # corr_cluster_runner(mu=0.1, avg_k=15, trial=1, method='GW', continuous=True, exact=True)
-    #
-    # main()
-    # for avg_k in [15, 20, 25]:
-    #     for mu in np.linspace(0, 1, 21):
-    #         lfr = LFRGraph(paths=paths, n=1000, mu=mu, avg_k=avg_k)
-    #         lfr.generate_graphs(num_graphs=20)
-    # paths = Paths(basedir='./')
-    # avg_k = 15
-    # mu = 0.4
-    # lfr = LFRGraph(paths=paths, n=1000, mu=mu, avg_k=avg_k)
-    # g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=15)
-    # print(nx.info(g), len(ground_truth_clustering.communities))
-    # # print(list(g.nodes(data=True))[: 2])
-    # #
-    # method = 'GW'
-    # is_continuous = True
-    # corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=is_continuous, method=method,
-    #                                      ground_truth_clustering=ground_truth_clustering, exact=True)
-    #
-    # corr_cluster.run(num_trials=1, overwrite=False)
-
-    # other_clustering = OtherClustering(paths=paths, input_graph=g, ground_truth_clustering=ground_truth_clustering,
-    #                                    method='leiden')
-    # other_clustering.run(num_trials=1, overwrite=True)
-    # corr_tester()
-    # other_methods_runner()
-    # LFR_runner()

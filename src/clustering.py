@@ -16,6 +16,8 @@ from cdlib import NodeClustering, algorithms
 from cdlib.evaluation import normalized_mutual_information, adjusted_mutual_information
 from tqdm.auto import tqdm
 
+from src.graph_io import LFRGraph
+
 sys.path.extend(['./', '../'])
 
 from src.utils import Paths, write_clustering, clusim_ec_score
@@ -281,14 +283,20 @@ class CorrelationClustering(BaseClustering):
             scipy.sparse.linalg.eigs(self.H, k=1, return_eigenvectors=False)[0])  # to make sure it's non-negative
 
         # tau_diff is inverse of the second smallest non-zero eigenvalue of H
-        # sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H.toarray(), right=False)))
-        sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H, right=False)))
-        second_smallest_eig = None
-        for eig in sorted_eigenvals:
-            if not np.isclose(eig, 0):
-                second_smallest_eig = eig
-                break
-        assert second_smallest_eig is not None, f'second smallest eigenvalue is None!!'
+
+        ### SLOW because it unnecessarily computes the whole spectrum
+        # sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H, right=False)))
+        # second_smallest_eig = None
+        # for eig in sorted_eigenvals:
+        #     if not np.isclose(eig, 0):
+        #         second_smallest_eig = eig
+        #         break
+        # assert second_smallest_eig is not None, f'second smallest eigenvalue is None!!'
+        # assert np.isclose(second_smallest_eig, second_smallest_eig_2), f'Second smallest: numpy {second_smallest_eig:.5f} != scipy: {second_smallest_eig_2:.5f}'
+
+        ##  new add - Jun 12 - dont compute whole spectrum
+        second_smallest_eig = np.real(scipy.sparse.linalg.eigs(self.H, k=2, which='SM', return_eigenvectors=False))[0]
+        assert not np.isclose(second_smallest_eig, 0), f'Second smallest eigenvalue is 0'
         self.tau_diff = 1 / second_smallest_eig
 
         return mapping
@@ -581,13 +589,18 @@ class MultiLouvainClustering(MarkovClustering):
 
         # tau_diff is inverse of the second smallest non-zero eigenvalue of H
         # sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H.toarray(), right=False)))
-        sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H, right=False)))
-        second_smallest_eig = None
-        for eig in sorted_eigenvals:
-            if not np.isclose(eig, 0):
-                second_smallest_eig = eig
-                break
-        assert second_smallest_eig is not None, f'second smallest eigenvalue is None!!'
+
+        # sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H, right=False)))
+        # second_smallest_eig = None
+        # for eig in sorted_eigenvals:
+        #     if not np.isclose(eig, 0):
+        #         second_smallest_eig = eig
+        #         break
+        # assert second_smallest_eig is not None, f'second smallest eigenvalue is None!!'
+
+        second_smallest_eig = np.real(scipy.sparse.linalg.eigs(self.H, k=2, which='SM', return_eigenvectors=False))[0]
+        assert not np.isclose(second_smallest_eig, 0), f'Second smallest eigenvalue is 0'
+
         self.tau_diff = 1 / second_smallest_eig
 
         return mapping
@@ -630,57 +643,67 @@ class OtherClustering(BaseClustering):
 
 
 if __name__ == '__main__':
-    # TODO: get description length from infomap object
-
     paths = Paths(basedir='../')
-    # avg_k = 15
-    # mu = 0.1
-    # lfr = LFRGraph(paths=paths, n=1000, mu=mu, avg_k=avg_k)
-    # g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=1)
+    avg_k = 15
+    mu = 0.05
+    for trial in range(1, 20):
+        lfr = LFRGraph(paths=paths, n=1_000, mu=mu, avg_k=avg_k)
+        g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=trial)
+        print(nx.info(g))
 
-    # g, g.name = nx.barbell_graph(4, 5), 'barbell'
-    # ground_truth_clustering = NodeClustering(communities=[[0, 1, 2, 3], [4, 5, 6, 7, 8], [9, 10, 11, 12]], graph=g)
-
-    # method = 'label_propagation'
-    # other_clustering = OtherClustering(paths=paths, input_graph=g, ground_truth_clustering=ground_truth_clustering,
-    #                                    method=method)
-    # other_clustering.run(num_trials=1, overwrite=True)
-    #
-    # cdlib.algorithms.greedy_modularity()
-    sizes = [30, 30, 30]
-    probs = [
-        [0.35, 0.05, 0.05],
-        [0.05, 0.35, 0.05],
-        [0.05, 0.05, 0.35]
-    ]
-
-    g = nx.stochastic_block_model(sizes, probs, seed=1)
-    ground_truth_clustering = NodeClustering(nx.community.louvain_communities(g), graph=g)
-
-    # g, g.name = nx.ring_of_cliques(51, clique_size=4), 'clique-ring-51'
-    # g, g.name = nx.barbell_graph(4, 5), 'barbell'
-    #
-    # ground_truth_clustering = NodeClustering(communities=[[0, 1, 2, 3], [4, 5, 6, 7, 8], [9, 10, 11, 12]], graph=g)
-
-    # ground_truth_clustering = NodeClustering(nx.community.louvain_communities(g), graph=g)
-
-    method = 'RW'
-    inertia_factor = 0.5
-    er_null_model = False
-    corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=True, method=method,
-                                         ground_truth_clustering=ground_truth_clustering, inertia_factor=inertia_factor,
-                                         erdos_renyi_null=er_null_model, inertia_type='v1')
-
-    clusterings, best_clusterings = corr_cluster.run(num_trials=1, write_stats=True, overwrite=True)
-    clusterings
-
-    # method = 'RW'
-    # markov_cluster = MarkovClustering(paths=paths, input_graph=g, continuous=True, method=method,
-    #                                   ground_truth_clustering=ground_truth_clustering)
-    # clusterings, best_clusterings = markov_cluster.run(num_trials=5, overwrite=True)
+        method = 'RW'
+        inertia_factor = 0.5
+        er_null_model = False
+        corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=True, method=method,
+                                             ground_truth_clustering=ground_truth_clustering,
+                                             inertia_factor=inertia_factor,
+                                             erdos_renyi_null=er_null_model, inertia_type='v1')
+    # clusterings, best_clusterings = corr_cluster.run(num_trials=3, write_stats=True, overwrite=True)
     # clusterings
-
-    # louvain_cluster = MultiLouvainClustering(paths=paths, input_graph=g,
-    #                                          ground_truth_clustering=ground_truth_clustering)
-    # clusterings, best_clusterings = louvain_cluster.run(num_trials=5, overwrite=True)
-    # best_clusterings
+    #
+    # # g, g.name = nx.barbell_graph(4, 5), 'barbell'
+    # # ground_truth_clustering = NodeClustering(communities=[[0, 1, 2, 3], [4, 5, 6, 7, 8], [9, 10, 11, 12]], graph=g)
+    #
+    # # method = 'label_propagation'
+    # # other_clustering = OtherClustering(paths=paths, input_graph=g, ground_truth_clustering=ground_truth_clustering,
+    # #                                    method=method)
+    # # other_clustering.run(num_trials=1, overwrite=True)
+    # #
+    # # cdlib.algorithms.greedy_modularity()
+    # sizes = [30, 30, 30]
+    # probs = [
+    #     [0.35, 0.05, 0.05],
+    #     [0.05, 0.35, 0.05],
+    #     [0.05, 0.05, 0.35]
+    # ]
+    #
+    # g = nx.stochastic_block_model(sizes, probs, seed=1)
+    # ground_truth_clustering = NodeClustering(nx.community.louvain_communities(g), graph=g)
+    #
+    # # g, g.name = nx.ring_of_cliques(51, clique_size=4), 'clique-ring-51'
+    # # g, g.name = nx.barbell_graph(4, 5), 'barbell'
+    # #
+    # # ground_truth_clustering = NodeClustering(communities=[[0, 1, 2, 3], [4, 5, 6, 7, 8], [9, 10, 11, 12]], graph=g)
+    #
+    # # ground_truth_clustering = NodeClustering(nx.community.louvain_communities(g), graph=g)
+    #
+    # method = 'RW'
+    # inertia_factor = 0.5
+    # er_null_model = False
+    # corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=True, method=method,
+    #                                      ground_truth_clustering=ground_truth_clustering, inertia_factor=inertia_factor,
+    #                                      erdos_renyi_null=er_null_model, inertia_type='v1')
+    #
+    # clusterings, best_clusterings = corr_cluster.run(num_trials=1, write_stats=True, overwrite=True)
+    # clusterings
+    #
+    # # method = 'RW'
+    # # markov_cluster = MarkovClustering(paths=paths, input_graph=g, continuous=True, method=method,
+    # #                                   ground_truth_clustering=ground_truth_clustering)
+    # # clusterings, best_clusterings = markov_cluster.run(num_trials=5, overwrite=True)
+    # # clusterings
+    #
+    # # louvain_cluster = MultiLouvainClustering(paths=paths, input_graph=g,
+    # #                                          ground_truth_clustering=ground_truth_clustering)
+    # # clusterings, best_clusterings = louvain_cluster.run(num_trials=5, overwrite=True)
+    # # best_clusterings

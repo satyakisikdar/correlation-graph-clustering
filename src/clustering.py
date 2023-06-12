@@ -16,10 +16,8 @@ from cdlib import NodeClustering, algorithms
 from cdlib.evaluation import normalized_mutual_information, adjusted_mutual_information
 from tqdm.auto import tqdm
 
-from src.graph_io import LFRGraph
-
 sys.path.extend(['./', '../'])
-
+from src.graph_io import SBMGraph
 from src.utils import Paths, write_clustering, clusim_ec_score
 from src.cluster_helper import corr_leakage_partitions, quality_score, leiden, infomap_runner
 
@@ -285,18 +283,20 @@ class CorrelationClustering(BaseClustering):
         # tau_diff is inverse of the second smallest non-zero eigenvalue of H
 
         ### SLOW because it unnecessarily computes the whole spectrum
-        # sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H, right=False)))
-        # second_smallest_eig = None
-        # for eig in sorted_eigenvals:
-        #     if not np.isclose(eig, 0):
-        #         second_smallest_eig = eig
-        #         break
-        # assert second_smallest_eig is not None, f'second smallest eigenvalue is None!!'
-        # assert np.isclose(second_smallest_eig, second_smallest_eig_2), f'Second smallest: numpy {second_smallest_eig:.5f} != scipy: {second_smallest_eig_2:.5f}'
+        sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H, right=False)))
+        second_smallest_eig = None
+        for eig in sorted_eigenvals:
+            if not np.isclose(eig, 0):
+                second_smallest_eig = eig
+                break
+        assert second_smallest_eig is not None, f'second smallest eigenvalue is None!!'
 
-        ##  new add - Jun 12 - dont compute whole spectrum
-        second_smallest_eig = np.real(scipy.sparse.linalg.eigs(self.H, k=2, which='SM', return_eigenvectors=False))[0]
-        assert not np.isclose(second_smallest_eig, 0), f'Second smallest eigenvalue is 0'
+        ##  new add - Jun 12 - dont compute whole spectrum - pick the 2nd largest value around 0
+        # second_smallest_eig = np.real(scipy.sparse.linalg.eigs(self.H, k=2, sigma=0, return_eigenvectors=False))[0]
+        # assert not np.isclose(second_smallest_eig, 0), f'Second smallest eigenvalue is 0'
+        # assert second_smallest_eig > 0, f'Second smallest eigenvalue is negative'
+        # assert np.isclose(second_smallest_eig, second_smallest_eig_old), f'Second smallest: numpy {second_smallest_eig:.5f} != scipy: {second_smallest_eig_2:.5f}'
+
         self.tau_diff = 1 / second_smallest_eig
 
         return mapping
@@ -517,17 +517,25 @@ class MarkovClustering(CorrelationClustering):
             scipy.sparse.linalg.eigs(self.H, k=1, return_eigenvectors=False)[0])  # to make sure it's non-negative
 
         # tau_diff is inverse of the second smallest non-zero eigenvalue of H
-        # sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H.toarray(), right=False)))
-        # sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H, right=False)))
-        # second_smallest_eig = None
-        # for eig in sorted_eigenvals:
-        #     if not np.isclose(eig, 0):
-        #         second_smallest_eig = eig
-        #         break
-        # assert second_smallest_eig is not None, f'second smallest eigenvalue is None!!'
 
-        second_smallest_eig = np.real(scipy.sparse.linalg.eigs(self.H, k=2, which='SM', return_eigenvectors=False))[0]
-        assert not np.isclose(second_smallest_eig, 0), f'Second smallest eigenvalue is 0'
+        sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H, right=False)))
+        second_smallest_eig = None
+        for eig in sorted_eigenvals:
+            if not np.isclose(eig, 0):
+                second_smallest_eig = eig
+                break
+        assert second_smallest_eig is not None, f'second smallest eigenvalue is None!!'
+        # eigs = np.abs(scipy.linalg.eig(self.H, k=2, sigma=0, which='LM', return_eigenvectors=False))
+        # second_smallest_eig = eigs[0]
+        #
+        # print('\nSorted eigenvalues....')
+        # for i, eig in enumerate(sorted_eigenvals[: 5]):
+        #     print(f'{i=} {eig=}')
+        # print(f'Scipy {eigs=}')
+        # print('----------\n')
+        #
+        # assert not np.isclose(second_smallest_eig, 0), f'Second smallest eigenvalue {second_smallest_eig} is 0. {self.method=} {self.input_graph.name}'
+        # assert second_smallest_eig > 0, f'Second smallest eigenvalue is negative'
         self.tau_diff = 1 / second_smallest_eig
 
         return mapping
@@ -591,19 +599,17 @@ class MultiLouvainClustering(MarkovClustering):
             scipy.sparse.linalg.eigs(self.H, k=1, return_eigenvectors=False)[0])  # to make sure it's non-negative
 
         # tau_diff is inverse of the second smallest non-zero eigenvalue of H
-        # sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H.toarray(), right=False)))
+        sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H, right=False)))
+        second_smallest_eig = None
+        for eig in sorted_eigenvals:
+            if not np.isclose(eig, 0):
+                second_smallest_eig = eig
+                break
+        assert second_smallest_eig is not None, f'second smallest eigenvalue is None!!'
 
-        # sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H, right=False)))
-        # second_smallest_eig = None
-        # for eig in sorted_eigenvals:
-        #     if not np.isclose(eig, 0):
-        #         second_smallest_eig = eig
-        #         break
-        # assert second_smallest_eig is not None, f'second smallest eigenvalue is None!!'
-
-        second_smallest_eig = np.real(scipy.sparse.linalg.eigs(self.H, k=2, which='SM', return_eigenvectors=False))[0]
-        assert not np.isclose(second_smallest_eig, 0), f'Second smallest eigenvalue is 0'
-
+        # second_smallest_eig = np.real(scipy.sparse.linalg.eigs(self.H, k=2, sigma=0, return_eigenvectors=False))[0]
+        # assert not np.isclose(second_smallest_eig, 0), f'Second smallest eigenvalue is 0'
+        # # assert second_smallest_eig > 0, f'Second smallest eigenvalue is negative'
         self.tau_diff = 1 / second_smallest_eig
 
         return mapping
@@ -649,18 +655,26 @@ if __name__ == '__main__':
     paths = Paths(basedir='../')
     avg_k = 15
     mu = 0.05
-    for trial in range(1, 20):
-        lfr = LFRGraph(paths=paths, n=1_000, mu=mu, avg_k=avg_k)
-        g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=trial)
-        print(nx.info(g))
+    # for trial in range(1, 20):
+    # lfr = LFRGraph(paths=paths, n=1_000, mu=mu, avg_k=avg_k)
+    # g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=trial)
 
-        method = 'RW'
-        inertia_factor = 0.5
-        er_null_model = False
-        corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=True, method=method,
-                                             ground_truth_clustering=ground_truth_clustering,
-                                             inertia_factor=inertia_factor,
-                                             erdos_renyi_null=er_null_model, inertia_type='v1')
+    sbm = SBMGraph(paths=paths, n=1_000, mu=0.05, avg_k=10)
+    g, ground_truth_clustering = sbm.get_graph_and_clustering(trial=2)
+    print(nx.info(g))
+
+    method = 'Diff'
+    inertia_factor = 0.5
+    er_null_model = False
+    markov_clustering = MarkovClustering(paths=paths, input_graph=g, continuous=True, method='RW',
+                                         ground_truth_clustering=ground_truth_clustering)
+    markov_clustering.run(num_trials=10, overwrite=True)
+    # corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=True, method=method,
+    #                                      ground_truth_clustering=ground_truth_clustering,
+    #                                      inertia_factor=inertia_factor,
+    #                                      erdos_renyi_null=er_null_model, inertia_type='v1')
+    # break
+
     # clusterings, best_clusterings = corr_cluster.run(num_trials=3, write_stats=True, overwrite=True)
     # clusterings
     #

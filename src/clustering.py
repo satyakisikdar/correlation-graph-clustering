@@ -518,13 +518,16 @@ class MarkovClustering(CorrelationClustering):
 
         # tau_diff is inverse of the second smallest non-zero eigenvalue of H
         # sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H.toarray(), right=False)))
-        sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H, right=False)))
-        second_smallest_eig = None
-        for eig in sorted_eigenvals:
-            if not np.isclose(eig, 0):
-                second_smallest_eig = eig
-                break
-        assert second_smallest_eig is not None, f'second smallest eigenvalue is None!!'
+        # sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H, right=False)))
+        # second_smallest_eig = None
+        # for eig in sorted_eigenvals:
+        #     if not np.isclose(eig, 0):
+        #         second_smallest_eig = eig
+        #         break
+        # assert second_smallest_eig is not None, f'second smallest eigenvalue is None!!'
+
+        second_smallest_eig = np.real(scipy.sparse.linalg.eigs(self.H, k=2, which='SM', return_eigenvectors=False))[0]
+        assert not np.isclose(second_smallest_eig, 0), f'Second smallest eigenvalue is 0'
         self.tau_diff = 1 / second_smallest_eig
 
         return mapping

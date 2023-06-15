@@ -13,6 +13,7 @@ import clusim.sim as sim
 import matplotlib
 import networkx as nx
 import numpy as np
+import scipy
 from cdlib import NodeClustering
 from cdlib.utils import convert_graph_formats
 from cdlib.viz.networks import __filter, COLOR
@@ -67,6 +68,34 @@ def clusim_similarity_score(clustering_1: NodeClustering, clustering_2: NodeClus
         raise NotImplementedError(f'{metric=}')
 
     return fn(clu1, clu2)
+
+
+def get_eigenvalues(H, fast=True, which='largest'):
+    """
+    Return the largest or smallest positive eigenvalue
+    """
+    eig = None
+    if not fast:
+        sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(H, right=False)))
+    if which == 'largest':
+        if fast:
+            eig = np.abs(scipy.sparse.linalg.eigs(H, k=1, which='LM', return_eigenvectors=False)[0])
+        else:
+            eig = sorted_eigenvals[-1]
+    elif which == 'smallest':
+        if fast:
+            # get 3 eigenvalues around 0
+            sorted_eigenvals = np.abs(scipy.sparse.linalg.eigs(H, k=3, which='LM', sigma=0, return_eigenvectors=False))
+
+        smallest_positive_eig = None
+        for eig in sorted_eigenvals:
+            if not np.isclose(eig, 0):
+                smallest_positive_eig = eig
+                break
+        eig = smallest_positive_eig
+
+    assert eig is not None
+    return eig
 
 
 def parallel_async(func, args, num_workers=10, timeout=None):

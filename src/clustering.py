@@ -18,7 +18,7 @@ from tqdm.auto import tqdm
 
 sys.path.extend(['./', '../'])
 from src.graph_io import SBMGraph
-from src.utils import Paths, write_clustering, clusim_ec_score
+from src.utils import Paths, write_clustering, clusim_ec_score, get_eigenvalues
 from src.cluster_helper import corr_leakage_partitions, quality_score, leiden, infomap_runner
 
 
@@ -277,27 +277,38 @@ class CorrelationClustering(BaseClustering):
         else:
             raise Exception()
 
-        self.tau_max = 1 / abs(
-            scipy.sparse.linalg.eigs(self.H, k=1, return_eigenvectors=False)[0])  # to make sure it's non-negative
+        ### NOTES
+        ## CL Diffusion is safe - H is always symmetric
+        ## Tau max -> inverse of largest eigenvalue (absolute value)
+        ## tau diff -> inverse of the "smallest" strictly positive eigenvalue
+        ## Save the specturm on disk?
 
-        # tau_diff is inverse of the second smallest non-zero eigenvalue of H
+        self.tau_max = 1 / abs(get_eigenvalues(H=self.H, which='largest'))
+        self.tau_diff = 1 / get_eigenvalues(H=self.H, which='smallest')
 
-        ### SLOW because it unnecessarily computes the whole spectrum
-        sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H, right=False)))
-        second_smallest_eig = None
-        for eig in sorted_eigenvals:
-            if not np.isclose(eig, 0):
-                second_smallest_eig = eig
-                break
-        assert second_smallest_eig is not None, f'second smallest eigenvalue is None!!'
-
-        ##  new add - Jun 12 - dont compute whole spectrum - pick the 2nd largest value around 0
-        # second_smallest_eig = np.real(scipy.sparse.linalg.eigs(self.H, k=2, sigma=0, return_eigenvectors=False))[0]
-        # assert not np.isclose(second_smallest_eig, 0), f'Second smallest eigenvalue is 0'
-        # assert second_smallest_eig > 0, f'Second smallest eigenvalue is negative'
-        # assert np.isclose(second_smallest_eig, second_smallest_eig_old), f'Second smallest: numpy {second_smallest_eig:.5f} != scipy: {second_smallest_eig_2:.5f}'
-
-        self.tau_diff = 1 / second_smallest_eig
+        ## OLD CODE
+        # self.tau_max = 1 / abs(
+        #     scipy.sparse.linalg.eigs(self.H, k=1, return_eigenvectors=False)[0])  # to make sure it's non-negative
+        #
+        # # tau_diff is inverse of the second smallest non-zero eigenvalue of H
+        #
+        # ### SLOW because it unnecessarily computes the whole spectrum
+        # sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H, right=False)))
+        # second_smallest_eig = None
+        # for eig in sorted_eigenvals:
+        #     if not np.isclose(eig, 0):
+        #         second_smallest_eig = eig
+        #         break
+        # assert second_smallest_eig is not None, f'second smallest eigenvalue is None!!'
+        #
+        # ##  new add - Jun 12 - dont compute whole spectrum - pick the 2nd largest value around 0
+        # # second_smallest_eig = np.abs(scipy.sparse.linalg.eigs(self.H, k=2, sigma=0, return_eigenvectors=False))[0]
+        #
+        # # assert not np.isclose(second_smallest_eig, 0), f'Second smallest eigenvalue is 0'
+        # # assert second_smallest_eig > 0, f'Second smallest eigenvalue is negative'
+        # # assert np.isclose(second_smallest_eig, second_smallest_eig_old), f'Second smallest: numpy {second_smallest_eig:.5f} != scipy: {second_smallest_eig_2:.5f}'
+        #
+        # self.tau_diff = 1 / second_smallest_eig
 
         return mapping
 
@@ -513,30 +524,34 @@ class MarkovClustering(CorrelationClustering):
         else:
             raise Exception()
 
-        self.tau_max = 1 / abs(
-            scipy.sparse.linalg.eigs(self.H, k=1, return_eigenvectors=False)[0])  # to make sure it's non-negative
+        self.tau_max = 1 / abs(get_eigenvalues(H=self.H, which='largest'))
+        self.tau_diff = 1 / get_eigenvalues(H=self.H, which='smallest')
 
-        # tau_diff is inverse of the second smallest non-zero eigenvalue of H
-
-        sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H, right=False)))
-        second_smallest_eig = None
-        for eig in sorted_eigenvals:
-            if not np.isclose(eig, 0):
-                second_smallest_eig = eig
-                break
-        assert second_smallest_eig is not None, f'second smallest eigenvalue is None!!'
-        # eigs = np.abs(scipy.linalg.eig(self.H, k=2, sigma=0, which='LM', return_eigenvectors=False))
-        # second_smallest_eig = eigs[0]
+        # OLD CODE
+        # self.tau_max = 1 / abs(
+        #     scipy.sparse.linalg.eigs(self.H, k=1, return_eigenvectors=False)[0])  # to make sure it's non-negative
         #
-        # print('\nSorted eigenvalues....')
-        # for i, eig in enumerate(sorted_eigenvals[: 5]):
-        #     print(f'{i=} {eig=}')
-        # print(f'Scipy {eigs=}')
-        # print('----------\n')
+        # # tau_diff is inverse of the second smallest non-zero eigenvalue of H
         #
-        # assert not np.isclose(second_smallest_eig, 0), f'Second smallest eigenvalue {second_smallest_eig} is 0. {self.method=} {self.input_graph.name}'
-        # assert second_smallest_eig > 0, f'Second smallest eigenvalue is negative'
-        self.tau_diff = 1 / second_smallest_eig
+        # sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H, right=False)))
+        # second_smallest_eig = None
+        # for eig in sorted_eigenvals:
+        #     if not np.isclose(eig, 0):
+        #         second_smallest_eig = eig
+        #         break
+        # assert second_smallest_eig is not None, f'second smallest eigenvalue is None!!'
+        # # eigs = np.abs(scipy.linalg.eig(self.H, k=2, sigma=0, which='LM', return_eigenvectors=False))
+        # # second_smallest_eig = eigs[0]
+        # #
+        # # print('\nSorted eigenvalues....')
+        # # for i, eig in enumerate(sorted_eigenvals[: 5]):
+        # #     print(f'{i=} {eig=}')
+        # # print(f'Scipy {eigs=}')
+        # # print('----------\n')
+        # #
+        # # assert not np.isclose(second_smallest_eig, 0), f'Second smallest eigenvalue {second_smallest_eig} is 0. {self.method=} {self.input_graph.name}'
+        # # assert second_smallest_eig > 0, f'Second smallest eigenvalue is negative'
+        # self.tau_diff = 1 / second_smallest_eig
 
         return mapping
 
@@ -595,22 +610,27 @@ class MultiLouvainClustering(MarkovClustering):
             self.Pi = self.D / (2 * m)
             self.Pi_steady = self.A_prime / (2 * m)
 
-        self.tau_max = 1 / abs(
-            scipy.sparse.linalg.eigs(self.H, k=1, return_eigenvectors=False)[0])  # to make sure it's non-negative
+        self.tau_max = 1 / abs(get_eigenvalues(H=self.H, which='largest'))
+        self.tau_diff = 1 / get_eigenvalues(H=self.H, which='smallest')
 
-        # tau_diff is inverse of the second smallest non-zero eigenvalue of H
-        sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H, right=False)))
-        second_smallest_eig = None
-        for eig in sorted_eigenvals:
-            if not np.isclose(eig, 0):
-                second_smallest_eig = eig
-                break
-        assert second_smallest_eig is not None, f'second smallest eigenvalue is None!!'
+        # old CODE
 
-        # second_smallest_eig = np.real(scipy.sparse.linalg.eigs(self.H, k=2, sigma=0, return_eigenvectors=False))[0]
-        # assert not np.isclose(second_smallest_eig, 0), f'Second smallest eigenvalue is 0'
-        # # assert second_smallest_eig > 0, f'Second smallest eigenvalue is negative'
-        self.tau_diff = 1 / second_smallest_eig
+        # self.tau_max = 1 / abs(
+        #     scipy.sparse.linalg.eigs(self.H, k=1, return_eigenvectors=False)[0])  # to make sure it's non-negative
+        #
+        # # tau_diff is inverse of the second smallest non-zero eigenvalue of H
+        # sorted_eigenvals = np.sort(np.abs(scipy.linalg.eig(self.H, right=False)))
+        # second_smallest_eig = None
+        # for eig in sorted_eigenvals:
+        #     if not np.isclose(eig, 0):
+        #         second_smallest_eig = eig
+        #         break
+        # assert second_smallest_eig is not None, f'second smallest eigenvalue is None!!'
+        #
+        # # second_smallest_eig = np.real(scipy.sparse.linalg.eigs(self.H, k=2, sigma=0, return_eigenvectors=False))[0]
+        # # assert not np.isclose(second_smallest_eig, 0), f'Second smallest eigenvalue is 0'
+        # # # assert second_smallest_eig > 0, f'Second smallest eigenvalue is negative'
+        # self.tau_diff = 1 / second_smallest_eig
 
         return mapping
 

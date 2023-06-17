@@ -143,7 +143,7 @@ def corr_cluster(paths, methods, mus=np.linspace(0, 1, 21), family='LFR', inerti
                             cluster_paths = set(
                                 get_cluster_paths(paths=paths, kind='CL', family=family, n=n, max_k=max_k, avg_k=avg_k,
                                                   mu=mu, trial=trial, is_continuous=continuous, method=method,
-                                                  erdos_renyi_null=erdos_renyi_null_model, inertia_factor=5,
+                                                  erdos_renyi_null=erdos_renyi_null_model, inertia_factor=inertia,
                                                   inertia_type=inertia_type)
                             )
                             for cluster_path in cluster_paths:
@@ -161,9 +161,7 @@ def corr_cluster(paths, methods, mus=np.linspace(0, 1, 21), family='LFR', inerti
     return
 
 
-
-def markov_cluster_runner(mu, avg_k, trial, method, continuous, family, n):
-    paths = Paths(basedir='./')
+def markov_cluster_runner(paths, mu, avg_k, trial, method, continuous, family, n):
     if family in ('LFR', 'LFR-easy'):
         lfr = LFRGraph(mu=mu, paths=paths, n=n, avg_k=avg_k, family=family)
         input_g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=trial)
@@ -180,7 +178,7 @@ def markov_cluster_runner(mu, avg_k, trial, method, continuous, family, n):
     return
 
 
-def markov_cluster(mus=np.linspace(0, 1, 21), family='LFR', n=1000, num_workers=5):
+def markov_cluster(paths, mus=np.linspace(0, 1, 21), family='LFR', n=1000, num_workers=5):
     print(f'Markov {mus=}')
     args = []
     # mus = np.linspace(0, 1, 21)
@@ -194,26 +192,48 @@ def markov_cluster(mus=np.linspace(0, 1, 21), family='LFR', n=1000, num_workers=
     if n > 1000:
         num_trials = 10
 
+    if n == 10_000:
+        max_k = 500
+    else:
+        max_k = 50
+
+    finished_paths = set(
+        pd.read_csv(paths.results_dir / 'stats_MC.csv', engine='c', usecols=['output_cluster_path'])
+        .output_cluster_path
+        .values
+    )
+    print(f'{len(finished_paths):,} finished runs')
+
     for mu in mus:  # 21
         for avg_k in (10, 15, 20):  # 3
             if avg_k == 10:
                 num_trials = 10
             for trial in range(1, num_trials + 1):  # 20
                 for method in methods:  # 3
-                    args.append((mu, avg_k, trial, method, continuous, family, n))  # 10
+                    cluster_paths = set(
+                        get_cluster_paths(paths=paths, kind='MC', family=family, n=n, max_k=max_k, avg_k=avg_k,
+                                          mu=mu, trial=trial, is_continuous=continuous, method=method,
+                                          erdos_renyi_null=False, inertia_factor=0,
+                                          inertia_type='v1')
+                    )
+                    for cluster_path in cluster_paths:
+                        if cluster_path in finished_paths:
+                            continue
+                        args.append((paths, mu, avg_k, trial, method, continuous, family, n))  # 10
 
-    # random.shuffle(args)
-    parallel_async(func=markov_cluster_runner, args=args, num_workers=num_workers, timeout=120)
+    print(f'Missing runs: {len(args):,} ({args[: 2]})')
+    if len(args) > 0:
+        random.shuffle(args)
+        parallel_async(func=markov_cluster_runner, args=args, num_workers=num_workers, timeout=120)
     return
 
 
-def multilouvain_cluster_runner(mu, avg_k, trial, family):
-    paths = Paths(basedir='./')
+def multilouvain_cluster_runner(paths, mu, avg_k, trial, family, n):
     if family in ('LFR', 'LFR-easy'):
-        lfr = LFRGraph(mu=mu, paths=paths, n=1000, avg_k=avg_k, family=family)
+        lfr = LFRGraph(mu=mu, paths=paths, n=n, avg_k=avg_k, family=family)
         input_g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=trial)
     elif family == 'sbm':
-        sbm = SBMGraph(mu=mu, paths=paths, n=1000, avg_k=avg_k, family=family)
+        sbm = SBMGraph(mu=mu, paths=paths, n=n, avg_k=avg_k, family=family)
         input_g, ground_truth_clustering = sbm.get_graph_and_clustering(trial=trial)
     else:
         raise NotImplementedError(f'{family=}')
@@ -225,12 +245,16 @@ def multilouvain_cluster_runner(mu, avg_k, trial, family):
     return
 
 
-def multilouvain(mus=np.linspace(0, 1, 21), family='LFR'):
+def multilouvain(paths, mus=np.linspace(0, 1, 21), family='LFR', n=1_000):
     print(f'MultiLouvain {mus=}')
+    finished_paths = set(
+        pd.read_csv(paths.results_dir / 'stats_ML.csv', engine='c', usecols=['output_cluster_path'])
+        .output_cluster_path
+        .values
+    )
+    print(f'{len(finished_paths):,} finished runs')
 
     num_workers = 4
-    args = []
-    # mus = np.linspace(0, 1, 21)
     continuous = True
 
     if family in ('LFR-easy', 'sbm'):
@@ -238,15 +262,34 @@ def multilouvain(mus=np.linspace(0, 1, 21), family='LFR'):
     else:
         num_trials = 20
 
+    if n == 10_000:
+        max_k = 500
+    else:
+        max_k = 50
+
+    args = []
     for mu in mus:  # 21
-        for avg_k in (10, 15, 20, 25)[: -1]:  # 3
+        for avg_k in (10, 15, 20):  # 3
             if avg_k == 10:
                 num_trials = 10
             for trial in range(1, num_trials + 1):  # 20
-                args.append((mu, avg_k, trial, family))  # 10
 
-    # random.shuffle(args)
-    parallel_async(func=multilouvain_cluster_runner, args=args, num_workers=num_workers, timeout=120)
+                cluster_paths = set(
+                    get_cluster_paths(paths=paths, kind='ML', family=family, n=n, max_k=max_k, avg_k=avg_k,
+                                      mu=mu, trial=trial, is_continuous=continuous, method='ML',
+                                      erdos_renyi_null=False, inertia_factor=0,
+                                      inertia_type='v1')
+                )
+                for cluster_path in cluster_paths:
+                    if cluster_path in finished_paths:
+                        continue
+
+                    args.append((paths, mu, avg_k, trial, family, n))  # 10
+
+    print(f'Missing runs: {len(args):,} ({args[: 2]})')
+    if len(args) > 0:
+        random.shuffle(args)
+        parallel_async(func=multilouvain_cluster_runner, args=args, num_workers=num_workers, timeout=120)
     return
 
 
@@ -347,24 +390,29 @@ if __name__ == '__main__':
     # family, n, num_workers = 'LFR', 1_000, 8
     # family, n, num_workers = 'LFR', 10_000, 10
 
-    # mus = np.linspace(0, 1, 21)
-    mus = [0.05, 0.1, 0.2, 0.4, 0.5, 0.6]
-    print(f'{family} {n=:,} {mus=} experiments')
+    mus = [0.05, 0.1, 0.2, 0.4, 0.5, 0.6]  # mus = np.linspace(0, 1, 21)
+    method = 'CL'
+    # method = 'Markov'
+    # method = 'MultiLouvain'
+    print(f'{method=!r} {family!r} {n=:,} {mus=} experiments')
 
     # inertia_values = list(range(0, 6)) + list(np.geomspace(1, 300, 5).round(2)) + [500, 750, 1000, 2000, 5000]
     # inertia_values = sorted(set(inertia_values))  # prevent duplicates
     inertia_values = [0, 1, 2, 3, 4, 5, 10, 20, 50, 100, 200, 500, 750, 1000, 2000, 5000]
 
-    # markov_cluster(family=family, mus=mus, n=n)
-
-    corr_cluster(paths=paths, mus=mus, inertia_range=inertia_values, family=family, inertia_type='v1',
-                 methods=['Diff', 'RW'], n=n,
-                 num_workers=num_workers)
-    corr_cluster(paths=paths, mus=mus, inertia_range=inertia_values, family=family, inertia_type='v2', methods=['RW'],
-                 n=n,
-                 num_workers=num_workers)
+    if method == 'CL':
+        corr_cluster(paths=paths, mus=mus, inertia_range=inertia_values, family=family, inertia_type='v1',
+                     methods=['Diff', 'RW'], n=n,
+                     num_workers=num_workers)
+        corr_cluster(paths=paths, mus=mus, inertia_range=inertia_values, family=family, inertia_type='v2',
+                     methods=['RW'],
+                     n=n, num_workers=num_workers)
+    elif method == 'Markov':
+        markov_cluster(paths=paths, family=family, mus=mus, n=n)
+    elif method == 'MultiLouvain':
+        multilouvain(family=family, mus=mus, n=n, paths=paths)
+    else:
+        raise NotImplementedError(f'{method=}')
 
     # lfr_level_stats(mus=mus)
     # other_methods()
-
-    # multilouvain(family=family, mus=mus)

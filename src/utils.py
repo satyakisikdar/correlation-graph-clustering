@@ -98,6 +98,43 @@ def get_eigenvalues(H, fast=True, which='largest'):
     return eig
 
 
+def get_cluster_paths(paths, kind, family, n, max_k, avg_k, mu, trial, method, inertia_factor, inertia_type,
+                      is_continuous=True, erdos_renyi_null=False):
+    """
+    Return a set of filenames, once for each tau_ix (19)
+    :return:
+    """
+    output_cluster_base = paths.results_dir / family / method
+    graph_name = f'{family}-{n // 1000}k-{max_k}-{avg_k}-{int(mu * 100)}_{trial}'
+
+    if kind == 'CL':
+        method_ = f'{method}-C' if is_continuous else f'{method}-D'
+        if inertia_factor != 0:
+            if inertia_type == 'v2':
+                method_ = f'{method_}-{inertia_factor}-v2'
+            else:
+                method_ = f'{method_}-{inertia_factor}'
+            if method == 'Diff':
+                method_ = f'{method_}-new'  # for newly adjusted inertia
+
+        if erdos_renyi_null:
+            method = f'{method_}-ER'
+        else:
+            method = method_
+    elif kind == 'MC':
+        method = f'MC-{method}-C'
+    elif kind == 'ML':
+        method = 'MultiLouvain'
+        output_cluster_base = paths.results_dir / family / 'MultiLouvain'
+    else:
+        raise NotImplementedError(f'Invalid {kind=}')
+
+    # for trial in tqdm(range(1, num_trials + 1), desc=desc, leave=False):  # trial is part of the name
+    cluster_paths = [str(output_cluster_base / f'{graph_name}_{method}_{tau_ix}_best_clusters.txt')
+                     for tau_ix in range(19)]
+    return cluster_paths
+
+
 def parallel_async(func, args, num_workers=10, timeout=None):
     def update_result(result):
         return result

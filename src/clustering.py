@@ -29,7 +29,7 @@ class BaseClustering:
         self.method = method
         self.input_graph = input_graph
         assert input_graph.name != '', f'Input graph name is blank.'
-        self.name = input_graph.name
+        self.name = input_graph.name  # the name contains the trial number
         self.ground_truth_clustering = ground_truth_clustering
         self.output_cluster_base = self.paths.results_dir / family / self.method
         return
@@ -158,7 +158,6 @@ class CorrelationClustering(BaseClustering):
         self.inertia_type = inertia_type
         self.full_leakage_score = None
         self.mapping = self._init_matrices()
-
         return
 
     def generate_taus(self):
@@ -397,7 +396,7 @@ class CorrelationClustering(BaseClustering):
             best_clustering = None
             best_score = None
 
-            for trial in tqdm(range(1, num_trials + 1), desc=desc, leave=False):
+            for trial in tqdm(range(1, num_trials + 1), desc=desc, leave=False):  # trial is part of the name
                 cluster_path = self.output_cluster_base / f'{self.name}_{method}_{tau_ix}_best_clusters.txt'
 
                 if cluster_path.exists() and not overwrite:  # clustering already exists

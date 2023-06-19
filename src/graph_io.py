@@ -31,8 +31,11 @@ class LFRGraph:
         self.avg_k = avg_k
         if n == 1_000:
             max_k = 50
+        elif n == 5_000:
+            max_k = 250
         elif n == 10_000:
             max_k = 500
+
         self.max_k = max_k
         self.family = family
         self.name = f'{family}-{self.n // 1000}k-{max_k}-{avg_k}-{int(self.mu * 100)}'
@@ -131,6 +134,8 @@ class LFRGraph:
         if self.family == 'LFR':
             if self.n == 1000:
                 c_min, c_max = 10, 100  # hard
+            elif self.n == 5_000:
+                c_min, c_max = 50, 500
             elif self.n == 10_000:
                 c_min, c_max = 100, 1000  # hard
         else:

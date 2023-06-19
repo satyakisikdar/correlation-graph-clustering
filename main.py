@@ -9,18 +9,18 @@ import pandas as pd
 
 sys.path.extend(['./', '../'])
 from src.clustering import CorrelationClustering, OtherClustering, MarkovClustering, MultiLouvainClustering
-from src.utils import Paths, parallel_async, get_cluster_paths
+from src.utils import Paths, parallel_async, get_cluster_paths, get_long_method_name
 from src.graph_io import LFRGraph, SBMGraph
 
 
 def LFR_runner(n: int):
     """
     Generate LFR graphs
-    TODO: doesnt run on servers, runs on my computer
     :return:
     """
     paths = Paths(basedir='./')
-    mus = np.linspace(0, 1, 21)
+    # mus = np.linspace(0, 1, 21)
+    mus = [0.05, 0.1, 0.2, 0.4, 0.5, 0.6]
     for mu in mus:
         for avg_k in [10, 15, 20]:
             lfr = LFRGraph(paths=paths, n=n, mu=mu, avg_k=avg_k)
@@ -84,8 +84,7 @@ def other_methods():
 
 
 def corr_cluster_runner(paths, mu, avg_k, trial, method, continuous, erdos_renyi_null_model=False, family='LFR',
-                        inertia=0,
-                        inertia_type='v1', n=1000):
+                        inertia=0, inertia_type='v1', n=1000, run_method=True):
     if family in ('LFR', 'LFR-easy'):
         lfr = LFRGraph(mu=mu, paths=paths, n=n, avg_k=avg_k, family=family)
         input_g, ground_truth_clustering = lfr.get_graph_and_clustering(trial=trial)
@@ -99,12 +98,13 @@ def corr_cluster_runner(paths, mu, avg_k, trial, method, continuous, erdos_renyi
                                               ground_truth_clustering=ground_truth_clustering,
                                               method=method, continuous=continuous, paths=paths,
                                               erdos_renyi_null=erdos_renyi_null_model, inertia_type=inertia_type)
-    clustering_method.run(num_trials=10, overwrite=False)
+    if run_method:
+        clustering_method.run(num_trials=10, overwrite=False)
     return
 
 
-def corr_cluster(paths, methods, mus=np.linspace(0, 1, 21), family='LFR', inertia_range=[0], inertia_type='v1',
-                 n=1_000, num_workers=10):
+def corr_cluster(paths, methods, mus=np.linspace(0, 1, 21), family='LFR', inertia_range=[0],
+                 n=1_000, num_workers=10, run_method=True):
     # inertia_range = np.arange(0.5, 5.5, 0.5)
     args = []
     print(f'{mus=} {inertia_range=}')
@@ -116,45 +116,92 @@ def corr_cluster(paths, methods, mus=np.linspace(0, 1, 21), family='LFR', inerti
 
     if n == 10_000:
         max_k = 500
+    elif n == 5_000:
+        max_k = 250
     else:
         max_k = 50
 
-    finished_paths = set(
-        pd.read_csv(paths.results_dir / 'stats_CL.csv', engine='c', usecols=['output_cluster_path'])
-        .output_cluster_path
-        .values
-    )
-    print(f'{len(finished_paths):,} finished runs')
+    if run_method:
+        finished_paths = set(
+            pd.read_csv(paths.results_dir / 'stats_CL.csv', engine='c', usecols=['output_cluster_path'])
+            .output_cluster_path
+            .values
+        )
+        print(f'{len(finished_paths):,} finished runs')
+    else:
+        spectrum_path = paths.results_dir / 'spectrum_CL.csv'
+        if spectrum_path.exists():
+            spectrum_df = pd.read_csv(spectrum_path, engine='c')
+        else:
+            spectrum_df = pd.DataFrame()
 
-    continuous = True
+        finished_paths = set()
+
+    continuous, erdos_renyi_null_model = True, False
+    num_found = 0
     for inertia in inertia_range:
-        for erdos_renyi_null_model in [False, True][: 1]:
-            for mu in mus:  # 21
-                for avg_k in (10, 15, 20):  # 3
-                    if avg_k == 10 or n == 10_000:
-                        num_trials = 10
-                    for trial in range(1, num_trials + 1):  # 20
-                        for method in methods:  # 3
-                            if method != 'RW':
-                                inertia_type = 'v1'
-                            if inertia > 0 and method == 'CO':  # no inertia for CO yet
-                                continue
-
+        for mu in mus:  # 21
+            for avg_k in (10, 15, 20):  # 3
+                if avg_k == 10 or n > 1_000:
+                    num_trials = 10
+                for trial in range(1, num_trials + 1):  # 20
+                    for method in methods:  # 3
+                        if inertia > 0 and method == 'CO':  # no inertia for CO yet
+                            continue
+                        if run_method:
                             cluster_paths = set(
                                 get_cluster_paths(paths=paths, kind='CL', family=family, n=n, max_k=max_k, avg_k=avg_k,
                                                   mu=mu, trial=trial, is_continuous=continuous, method=method,
                                                   erdos_renyi_null=erdos_renyi_null_model, inertia_factor=inertia,
-                                                  inertia_type=inertia_type)
+                                                  inertia_type='v1')
                             )
+                            if method == 'RW':
+                                cluster_paths.update(
+                                    get_cluster_paths(paths=paths, kind='CL', family=family, n=n, max_k=max_k,
+                                                      avg_k=avg_k,
+                                                      mu=mu, trial=trial, is_continuous=continuous, method=method,
+                                                      erdos_renyi_null=erdos_renyi_null_model, inertia_factor=inertia,
+                                                      inertia_type='v2')
+                                )
+
                             for cluster_path in cluster_paths:
                                 if cluster_path in finished_paths:
+                                    num_found += 1
                                     continue
+                                if 'v2' in cluster_path:
+                                    inertia_type = 'v2'
+                                else:
+                                    inertia_type = 'v1'
                                 args.append(
                                     (paths, mu, avg_k, trial, method, continuous, erdos_renyi_null_model, family,
-                                     inertia,
-                                     inertia_type, n))  # 10
+                                     inertia, inertia_type, n, True))  # 10
+                        else:  ## this is for spectrum
+                            found = False
+                            for inertia_type in ['v1', 'v2']:
+                                if method != 'RW' and inertia_type == 'v2':
+                                    continue
 
-    print(f'Missing runs: {len(args):,}')
+                                method_long = get_long_method_name(kind='CL', method=method, inertia_type=inertia_type,
+                                                                   inertia_factor=inertia, is_continuous=continuous,
+                                                                   erdos_renyi_null=erdos_renyi_null_model)
+                                if len(spectrum_df) > 0:
+                                    rows = (
+                                        spectrum_df
+                                        .query(
+                                            'method==@method_long & avg_k==@avg_k & family==@family & mu==@mu & trial==@trial')
+                                    )
+                                    if len(rows) == 1:
+                                        found = True
+                                        num_found += 1
+                                    elif len(rows) > 1:
+                                        raise NotImplementedError(f'{len(rows)=:,} found. expecting 0 or 1.')
+
+                                if not found:
+                                    args.append(
+                                        (paths, mu, avg_k, trial, method, continuous, erdos_renyi_null_model, family,
+                                         inertia, inertia_type, n, False))  # 10
+
+    print(f'Found: {num_found:,} \t Missing: {len(args):,}, {num_workers=:,} {run_method=}')
     if len(args) > 0:
         random.shuffle(args)
         parallel_async(func=corr_cluster_runner, args=args, num_workers=num_workers)
@@ -370,9 +417,7 @@ def lfr_level_stats(mus, family='LFR', overwrite=False):
 
 
 if __name__ == '__main__':
-    # TODO check tau_max calculation with Arsham
-
-    # LFR_runner(n=10_000)
+    # LFR_runner(n=5_000)
 
     # sbm = SBMGraph(paths=paths, n=1_000, mu=0.05, avg_k=10)
     # g, ground_truth_clustering = sbm.get_graph_and_clustering(trial=2)
@@ -386,27 +431,23 @@ if __name__ == '__main__':
     # markov_clustering.run(num_trials=10, overwrite=True)
     #
     paths = Paths(basedir='./')
-    family, n, num_workers = 'sbm', 1_000, 6
-    # family, n, num_workers = 'LFR', 1_000, 8
-    # family, n, num_workers = 'LFR', 10_000, 10
+    # # family, n, num_workers = 'sbm', 1_000, 6
+    family, n, num_workers = 'LFR', 5_000, 12
+    # # family, n, num_workers = 'LFR', 1_000, 8
+    # family, n, num_workers = 'LFR', 10_000, 6
 
     mus = [0.05, 0.1, 0.2, 0.4, 0.5, 0.6]  # mus = np.linspace(0, 1, 21)
     method = 'CL'
-    # method = 'Markov'
-    # method = 'MultiLouvain'
+    # # method = 'Markov'
+    # # method = 'MultiLouvain'
     print(f'{method=!r} {family!r} {n=:,} {mus=} experiments')
 
-    # inertia_values = list(range(0, 6)) + list(np.geomspace(1, 300, 5).round(2)) + [500, 750, 1000, 2000, 5000]
-    # inertia_values = sorted(set(inertia_values))  # prevent duplicates
-    inertia_values = [0, 1, 2, 3, 4, 5, 10, 20, 50, 100, 200, 500, 750, 1000, 2000, 5000]
+    # # inertia_values = sorted(set(list(range(0, 6)) + list(np.geomspace(1, 300, 5).round(2)) + [500, 750, 1000, 2000, 5000]))
+    inertia_values = [0, 1, 2, 3, 4, 5, 10, 20, 50, 100, 200, 500, 750, 1000, 2000, 5000][: 5]
 
     if method == 'CL':
-        corr_cluster(paths=paths, mus=mus, inertia_range=inertia_values, family=family, inertia_type='v1',
-                     methods=['Diff', 'RW'], n=n,
-                     num_workers=num_workers)
-        corr_cluster(paths=paths, mus=mus, inertia_range=inertia_values, family=family, inertia_type='v2',
-                     methods=['RW'],
-                     n=n, num_workers=num_workers)
+        corr_cluster(paths=paths, mus=mus, inertia_range=inertia_values, family=family,
+                     methods=['Diff', 'RW'], n=n, num_workers=num_workers, run_method=False)
     elif method == 'Markov':
         markov_cluster(paths=paths, family=family, mus=mus, n=n)
     elif method == 'MultiLouvain':

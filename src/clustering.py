@@ -10,6 +10,7 @@ from typing import Dict
 import cdlib
 import networkx as nx
 import numpy as np
+import pandas as pd
 import scipy.sparse
 import scipy.sparse.linalg
 from cdlib import NodeClustering, algorithms
@@ -27,6 +28,7 @@ class BaseClustering:
                  ground_truth_clustering: NodeClustering, method: str, family: str = 'LFR'):
         self.paths = paths
         self.method = method
+        self.family = family
         self.input_graph = input_graph
         assert input_graph.name != '', f'Input graph name is blank.'
         self.name = input_graph.name  # the name contains the trial number
@@ -37,6 +39,99 @@ class BaseClustering:
     @abc.abstractmethod
     def _run_method(self, **params) -> NodeClustering:
         pass
+
+    def get_long_method_name(self):
+        """
+        Incorporates inertia info and returns the cleaned method name
+        """
+        method_ = f'{self.method}-C' if self.is_continuous else f'{self.method}-D'
+        if self.__class__.__name__ == "MarkovClustering":
+            method = f'MC-{method_}'
+        elif self.__class__.__name__ == 'MultiLouvainClustering':
+            method = f'MultiLouvain'
+        else:
+            method = method_
+
+        if self.__class__.__name__ == 'CorrelationClustering':
+            if self.inertia_factor != 0:
+                if self.inertia_type == 'v2':
+                    method_ = f'{method_}-{self.inertia_factor}-v2'
+                else:
+                    method_ = f'{method_}-{self.inertia_factor}'
+                if self.method == 'Diff':
+                    method_ = f'{method_}-new'  # for newly adjusted inertia
+
+            if self.erdos_renyi_null:
+                method = f'{method_}-ER'
+            else:
+                method = method_
+        return method
+
+    def write_taus(self, running_time):
+        """
+        Write tau_max and tau_diff to disk
+        """
+        class_name = self.__class__.__name__
+        if class_name == 'CorrelationClustering':
+            stats_path = self.paths.results_dir / 'spectrum_CL.csv'
+        elif class_name == 'MarkovClustering':
+            stats_path = self.paths.results_dir / 'spectrum_MC.csv'
+        elif class_name == 'MultiLouvainClustering':
+            stats_path = self.paths.results_dir / 'spectrum_ML.csv'
+        else:
+            raise NotImplementedError(f'Invalid stats_path error {self.__name__}')
+
+        file_exists = stats_path.exists()
+        cols = ['timestamp', 'family', 'name', 'avg_k', 'trial', 'mu', 'method_short', 'method', 'tau_max', 'tau_diff',
+                'running_time']
+
+        stats_dict = dict(
+            timestamp=datetime.now().strftime('%c').strip(),
+            family=self.family,
+            name=self.name,
+            avg_k=self.input_graph.graph.get('avg_k'),
+            trial=int(self.name.split('_')[-1]),
+            mu=self.input_graph.graph.get('mu'),
+            method_short=self.method,
+            method=self.get_long_method_name(),
+            tau_max=self.tau_max,
+            tau_diff=self.tau_diff,
+            running_time=f'{running_time:.2f}',
+        )
+
+        with open(stats_path, 'a') as f:
+            csv_writer = csv.DictWriter(f, fieldnames=cols)
+            if not file_exists:
+                csv_writer.writeheader()
+            csv_writer.writerow(stats_dict)
+
+        return
+
+    def read_taus(self):
+        class_name = self.__class__.__name__
+        if class_name == 'CorrelationClustering':
+            stats_path = self.paths.results_dir / 'spectrum_CL.csv'
+        elif class_name == 'MarkovClustering':
+            stats_path = self.paths.results_dir / 'spectrum_MC.csv'
+        elif class_name == 'MultiLouvainClustering':
+            stats_path = self.paths.results_dir / 'spectrum_ML.csv'
+        else:
+            raise NotImplementedError(f'Invalid stats_path error {self.__name__}')
+
+        if not stats_path.exists():
+            return None
+
+        tau_df = pd.read_csv(stats_path, engine='c')
+        rows = (
+            tau_df
+            [(tau_df.name == self.name) & (tau_df.method == self.get_long_method_name())]
+        )
+        if len(rows) == 0:
+            return None
+        else:
+            assert len(rows) == 1, f'More than 1 row found for {self.name!r} {self.get_long_method_name()!r}'
+            tau_max, tau_diff = tau_df.tau_max.values[0], tau_df.tau_diff.values[0]
+            return tau_max, tau_diff
 
     def write_stats(self, stats_dict, stats_path):
         file_exists = stats_path.exists()
@@ -150,7 +245,6 @@ class CorrelationClustering(BaseClustering):
         super().__init__(paths=paths, input_graph=input_graph, ground_truth_clustering=ground_truth_clustering,
                          method=method, family=family)
         assert method in CorrelationClustering._METHODS, f'Incorrect {method!r} pick from {CorrelationClustering._METHODS}'
-        self.method = method
         self.erdos_renyi_null = erdos_renyi_null
         assert isinstance(continuous, bool)
         self.is_continuous = continuous  # true if continuous
@@ -282,8 +376,17 @@ class CorrelationClustering(BaseClustering):
         ## tau diff -> inverse of the "smallest" strictly positive eigenvalue
         ## Save the specturm on disk?
 
-        self.tau_max = 1 / abs(get_eigenvalues(H=self.H, which='largest'))
-        self.tau_diff = 1 / get_eigenvalues(H=self.H, which='smallest')
+        taus = self.read_taus()
+        if taus is None:
+            # print(f'{self.name!r} {self.method!r}')
+            tic = time.time()
+            self.tau_max = 1 / abs(get_eigenvalues(H=self.H, which='largest'))
+            self.tau_diff = 1 / get_eigenvalues(H=self.H, which='smallest')
+            toc = time.time()
+            self.write_taus(running_time=toc - tic)
+        else:
+            # print(f'Reading saved taus')
+            self.tau_max, self.tau_diff = taus
 
         ## OLD CODE
         # self.tau_max = 1 / abs(
@@ -368,33 +471,13 @@ class CorrelationClustering(BaseClustering):
 
             if tau not in clusterings:
                 clusterings[tau] = []
-            method_ = f'{self.method}-C' if self.is_continuous else f'{self.method}-D'
-            if self.__class__.__name__ == "MarkovClustering":
-                method = f'MC-{method_}'
-            elif self.__class__.__name__ == 'MultiLouvainClustering':
-                method = f'MultiLouvain'
-            else:
-                method = method_
-
-            if self.__class__.__name__ == 'CorrelationClustering':
-                if self.inertia_factor != 0:
-                    if self.inertia_type == 'v2':
-                        method_ = f'{method_}-{self.inertia_factor}-v2'
-                    else:
-                        method_ = f'{method_}-{self.inertia_factor}'
-                    if self.method == 'Diff':
-                        method_ = f'{method_}-new'  # for newly adjusted inertia
-
-                if self.erdos_renyi_null:
-                    method = f'{method_}-ER'
-                else:
-                    method = method_
 
             mu = self.input_graph.graph.get('mu', np.nan)
             self.input_graph.graph.get('avg_k', np.nan)
-            desc = f'{self.__class__.__name__[: 5]} {method} {mu=} {tau_ix=} ..'
+            desc = f'{self.family!r} {self.__class__.__name__[: 5]} {method} {mu=} {tau_ix=} ..'
             best_clustering = None
             best_score = None
+            method = self.get_long_method_name()
 
             for trial in tqdm(range(1, num_trials + 1), desc=desc, leave=False):  # trial is part of the name
                 cluster_path = self.output_cluster_base / f'{self.name}_{method}_{tau_ix}_best_clusters.txt'
@@ -521,7 +604,7 @@ class MarkovClustering(CorrelationClustering):
                 self.Pi = self.D / (2 * m)
                 self.Pi_steady = self.A_prime / (2 * m)
         else:
-            raise Exception()
+            raise Exception(f'{self.method}')
 
         self.tau_max = 1 / abs(get_eigenvalues(H=self.H, which='largest'))
         self.tau_diff = 1 / get_eigenvalues(H=self.H, which='smallest')
@@ -682,17 +765,17 @@ if __name__ == '__main__':
     g, ground_truth_clustering = sbm.get_graph_and_clustering(trial=2)
     print(nx.info(g))
 
-    method = 'Diff'
+    method = 'RW'
     inertia_factor = 0.5
     er_null_model = False
     markov_clustering = MarkovClustering(paths=paths, input_graph=g, continuous=True, method='RW',
                                          ground_truth_clustering=ground_truth_clustering)
-    markov_clustering.run(num_trials=10, overwrite=True)
-    # corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=True, method=method,
-    #                                      ground_truth_clustering=ground_truth_clustering,
-    #                                      inertia_factor=inertia_factor,
-    #                                      erdos_renyi_null=er_null_model, inertia_type='v1')
-    # break
+    # markov_clustering.run(num_trials=10, overwrite=True)
+    corr_cluster = CorrelationClustering(paths=paths, input_graph=g, continuous=True, method=method,
+                                         ground_truth_clustering=ground_truth_clustering,
+                                         inertia_factor=inertia_factor,
+                                         erdos_renyi_null=er_null_model, inertia_type='v2')
+    print()
 
     # clusterings, best_clusterings = corr_cluster.run(num_trials=3, write_stats=True, overwrite=True)
     # clusterings

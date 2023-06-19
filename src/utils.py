@@ -98,15 +98,7 @@ def get_eigenvalues(H, fast=True, which='largest'):
     return eig
 
 
-def get_cluster_paths(paths, kind, family, n, max_k, avg_k, mu, trial, method, inertia_factor, inertia_type,
-                      is_continuous=True, erdos_renyi_null=False):
-    """
-    Return a set of filenames, once for each tau_ix (19)
-    :return:
-    """
-    output_cluster_base = paths.results_dir / family / method
-    graph_name = f'{family}-{n // 1000}k-{max_k}-{avg_k}-{int(mu * 100)}_{trial}'
-
+def get_long_method_name(kind, method, inertia_factor, inertia_type, is_continuous=True, erdos_renyi_null=False):
     if kind == 'CL':
         method_ = f'{method}-C' if is_continuous else f'{method}-D'
         if inertia_factor != 0:
@@ -125,9 +117,22 @@ def get_cluster_paths(paths, kind, family, n, max_k, avg_k, mu, trial, method, i
         method = f'MC-{method}-C'
     elif kind == 'ML':
         method = 'MultiLouvain'
+    return method
+
+
+def get_cluster_paths(paths, kind, family, n, max_k, avg_k, mu, trial, method, inertia_factor, inertia_type,
+                      is_continuous=True, erdos_renyi_null=False):
+    """
+    Return a set of filenames, once for each tau_ix (19)
+    :return:
+    """
+    output_cluster_base = paths.results_dir / family / method
+    graph_name = f'{family}-{n // 1000}k-{max_k}-{avg_k}-{int(mu * 100)}_{trial}'
+    method = get_long_method_name(kind=kind, method=method, inertia_factor=inertia_factor, inertia_type=inertia_type,
+                                  is_continuous=is_continuous, erdos_renyi_null=erdos_renyi_null)
+
+    if kind == 'ML':
         output_cluster_base = paths.results_dir / family / 'MultiLouvain'
-    else:
-        raise NotImplementedError(f'Invalid {kind=}')
 
     # for trial in tqdm(range(1, num_trials + 1), desc=desc, leave=False):  # trial is part of the name
     cluster_paths = [str(output_cluster_base / f'{graph_name}_{method}_{tau_ix}_best_clusters.txt')
@@ -145,6 +150,7 @@ def parallel_async(func, args, num_workers=10, timeout=None):
         for arg in args:
             r = pool.apply_async(func, arg, callback=update_result)
             async_promises.append(r)
+        # for r in tqdm(async_promises, desc=f'{len(args):,} jobs', unit_scale=True, unit='job', miniters=1):
         for r in async_promises:
             try:
                 r.wait(timeout=timeout)

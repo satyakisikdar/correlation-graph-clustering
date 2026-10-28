@@ -1,3 +1,3 @@
 # Correlation Graph Clustering
 
-Code release for the paper *Functional mesoscale organization of complex networks*.
+Code release for the paper *Thermodynamic characterization of mesoscale organization via network density matrices*.
